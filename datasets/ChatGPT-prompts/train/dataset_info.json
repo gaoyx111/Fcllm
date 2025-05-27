@@ -1,0 +1,42 @@
+{
+  "builder_name": "csv",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "chat_gpt-prompts",
+  "dataset_size": 422394,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/MohamedRashad/ChatGPT-prompts@6c258c8c477a799c95246cca4cf8bf734d3c36ad/train.csv": {
+      "num_bytes": 421971,
+      "checksum": null
+    }
+  },
+  "download_size": 421971,
+  "features": {
+    "human_prompt": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "chatgpt_response": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 844365,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 422394,
+      "num_examples": 360,
+      "dataset_name": "chat_gpt-prompts"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}
