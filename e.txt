@@ -1,0 +1,2342 @@
+   Compiling ring v0.17.14
+   Compiling onig_sys v69.8.1
+   Compiling esaxx-rs v0.1.10
+   Compiling rustls v0.23.27
+   Compiling rustls-webpki v0.103.3
+   Compiling onig v6.4.0
+   Compiling tokenizers v0.21.1
+   Compiling ureq v2.12.1
+   Compiling hf-hub v0.4.2
+   Compiling Fcllm v0.1.0 (E:\Rust\Fcllm)
+warning: found module declaration for main.rs
+ --> src\lib.rs:6:1
+  |
+6 | pub mod main;
+  | ^^^^^^^^^^^^^
+  |
+  = note: a binary crate cannot be used as library
+  = note: `#[warn(special_module_name)]` on by default
+
+warning: unused imports: `VarBuilder`, `linear_no_bias`, and `linear`
+ --> src\models\Qwen\modeling_qwen_moe.rs:2:31
+  |
+2 | use candle_nn::{self, Module, VarBuilder, Linear, linear, linear_no_bias, Embedding};
+  |                               ^^^^^^^^^^          ^^^^^^  ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `BTreeMap`
+ --> src\models\Qwen\modeling_qwen_moe.rs:3:42
+  |
+3 | use std::collections::{HashSet, HashMap, BTreeMap};
+  |                                          ^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> src\models\Qwen\modeling_qwen_moe.rs:4:5
+  |
+4 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `dashmap::DashMap`
+ --> src\models\Qwen\modeling_qwen_moe.rs:5:5
+  |
+5 | use dashmap::DashMap;
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Error`
+ --> src\main.rs:5:42
+  |
+5 | use candle_core::{Tensor, Device, DType, Error};
+  |                                          ^^^^^
+
+error[E0277]: the size for values of type `(dyn std::error::Error + 'static)` cannot be known at compilation time
+   --> src\models\Qwen\modeling_qwen_moe.rs:744:17
+    |
+744 |     pub act_fn: fn(&Tensor) -> Result<Tensor, dyn Error>,
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `(dyn std::error::Error + 'static)`
+note: required by an implicit `Sized` bound in `Result`
+   --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\result.rs:528:20
+    |
+528 | pub enum Result<T, E> {
+    |                    ^ required by the implicit `Sized` requirement on this type parameter in `Result`
+
+error[E0277]: cannot divide `f64` by `Result<candle_core::Tensor, candle_core::Error>`
+  --> src\quantizer.rs:49:33
+   |
+49 |     let scale = ((max_v as f64) / (&_max - &_min)).clamp_max(2e4)?;
+   |                                 ^ no implementation for `f64 / Result<candle_core::Tensor, candle_core::Error>`
+   |
+   = help: the trait `std::ops::Div<Result<candle_core::Tensor, candle_core::Error>>` is not implemented for `f64`
+   = help: the following other types implement trait `std::ops::Div<Rhs>`:
+             `&f64` implements `std::ops::Div<&num_complex::Complex<f64>>`
+             `&f64` implements `std::ops::Div<f64>`
+             `&f64` implements `std::ops::Div<num_complex::Complex<f64>>`
+             `&f64` implements `std::ops::Div`
+             `f64` implements `std::ops::Div<&candle_core::Tensor>`
+             `f64` implements `std::ops::Div<&f64>`
+             `f64` implements `std::ops::Div<&num_complex::Complex<f64>>`
+             `f64` implements `std::ops::Div<candle_core::Tensor>`
+           and 3 others
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+  --> src\quantizer.rs:50:17
+   |
+50 |     let zero = -(&_min * &scale)?;
+   |                 ^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `candle_core::Tensor`
+   |
+   = help: the trait `Try` is not implemented for `candle_core::Tensor`
+
+error[E0277]: the trait bound `Vec<usize>: NdArray` is not satisfied
+   --> src\quantizer.rs:65:31
+    |
+65  |         ("shape", Tensor::new(shape.dims().to_vec(), w.device())?),
+    |                   ----------- ^^^^^^^^^^^^^^^^^^^^^ the trait `NdArray` is not implemented for `Vec<usize>`
+    |                   |
+    |                   required by a bound introduced by this call
+    |
+    = help: the following other types implement trait `NdArray`:
+              Vec<&[S]>
+              Vec<S>
+              Vec<Vec<S>>
+              Vec<Vec<Vec<S>>>
+              Vec<Vec<Vec<Vec<S>>>>
+note: required by a bound in `candle_core::Tensor::new`
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:380:19
+    |
+380 |     pub fn new<A: crate::device::NdArray>(array: A, device: &Device) -> Result<Self> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Tensor::new`
+
+error[E0277]: the trait bound `usize: WithDType` is not satisfied
+    --> src\quantizer.rs:76:65
+     |
+76   |             let shape_dims: Vec<usize> = map["shape"].to_vec1::<usize>()?;
+     |                                                       -------   ^^^^^ the trait `WithDType` is not implemented for `usize`
+     |                                                       |
+     |                                                       required by a bound introduced by this call
+     |
+     = help: the following other types implement trait `WithDType`:
+               f32
+               f64
+               i64
+               u32
+               u8
+note: required by a bound in `candle_core::Tensor::to_vec1`
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:1681:23
+     |
+1681 |     pub fn to_vec1<S: crate::WithDType>(&self) -> Result<Vec<S>> {
+     |                       ^^^^^^^^^^^^^^^^ required by this bound in `Tensor::to_vec1`
+
+error[E0277]: the trait bound `candle_core::Error: From<&str>` is not satisfied
+  --> src\quantizer.rs:90:57
+   |
+90 |                 _ => return Err("Unsupported bit width".into()),
+   |                                                         ^^^^ the trait `From<&str>` is not implemented for `candle_core::Error`
+   |
+   = help: the following other types implement trait `From<T>`:
+             `candle_core::Error` implements `From<CudaError>`
+             `candle_core::Error` implements `From<FromUtf8Error>`
+             `candle_core::Error` implements `From<MetalError>`
+             `candle_core::Error` implements `From<Object>`
+             `candle_core::Error` implements `From<ParseIntError>`
+             `candle_core::Error` implements `From<SafeTensorError>`
+             `candle_core::Error` implements `From<std::io::Error>`
+             `candle_core::Error` implements `From<std::num::TryFromIntError>`
+           and 2 others
+   = note: required for `&str` to implement `Into<candle_core::Error>`
+
+error[E0277]: the trait bound `candle_core::Error: From<&str>` is not satisfied
+  --> src\quantizer.rs:99:93
+   |
+99 |         TensorOrMap::Single(_) => Err("dequantize expects TensorOrMap::Map, but got Single".into()),
+   |                                                                                             ^^^^ the trait `From<&str>` is not implemented for `candle_core::Error`
+   |
+   = help: the following other types implement trait `From<T>`:
+             `candle_core::Error` implements `From<CudaError>`
+             `candle_core::Error` implements `From<FromUtf8Error>`
+             `candle_core::Error` implements `From<MetalError>`
+             `candle_core::Error` implements `From<Object>`
+             `candle_core::Error` implements `From<ParseIntError>`
+             `candle_core::Error` implements `From<SafeTensorError>`
+             `candle_core::Error` implements `From<std::io::Error>`
+             `candle_core::Error` implements `From<std::num::TryFromIntError>`
+           and 2 others
+   = note: required for `&str` to implement `Into<candle_core::Error>`
+
+error[E0277]: the trait bound `std::string::String: Into<anyhow::Error>` is not satisfied
+  --> src\utils.rs:13:56
+   |
+13 |         _ => Err("Boolean value expected.".to_string().into()),
+   |                                                        ^^^^ the trait `std::error::Error` is not implemented for `std::string::String`
+   |
+   = note: required for `anyhow::Error` to implement `From<std::string::String>`
+   = note: required for `std::string::String` to implement `Into<anyhow::Error>`
+
+error[E0599]: no method named `strip_prefix` found for enum `Option` in the current scope
+  --> src\utils.rs:19:43
+   |
+19 |     let device_index: u32 = config.device.strip_prefix("cuda:")
+   |                                           ^^^^^^^^^^^^ method not found in `Option<Device>`
+
+error[E0599]: no method named `shl` found for struct `candle_core::Tensor` in the current scope
+   --> src\utils.rs:134:29
+    |
+134 |     let high = w.i(..step)?.shl(4)?;
+    |                             ^^^ method not found in `Tensor`
+
+error[E0599]: no method named `bitand` found for reference `&candle_core::Tensor` in the current scope
+   --> src\utils.rs:142:18
+    |
+142 |     let high = w.bitand(0b11110000u8)?.shr(4)?;
+    |                  ^^^^^^
+    |
+help: there is a method `tanh` with a similar name, but with different arguments
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:578:5
+    |
+578 |     unary_op!(tanh, Tanh);
+    |     ^^^^^^^^^^^^^^^^^^^^^
+    = note: this error originates in the macro `unary_op` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: no method named `bitand` found for reference `&candle_core::Tensor` in the current scope
+   --> src\utils.rs:143:17
+    |
+143 |     let low = w.bitand(0b00001111u8)?;
+    |                 ^^^^^^
+    |
+help: there is a method `tanh` with a similar name, but with different arguments
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:578:5
+    |
+578 |     unary_op!(tanh, Tanh);
+    |     ^^^^^^^^^^^^^^^^^^^^^
+    = note: this error originates in the macro `unary_op` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: no method named `shl` found for struct `candle_core::Tensor` in the current scope
+   --> src\utils.rs:151:27
+    |
+151 |     let a = w.i(0..step)?.shl(6)?;
+    |                           ^^^ method not found in `Tensor`
+
+error[E0599]: no method named `shl` found for struct `candle_core::Tensor` in the current scope
+   --> src\utils.rs:152:34
+    |
+152 |     let b = w.i(step..2 * step)?.shl(4)?;
+    |                                  ^^^ method not found in `Tensor`
+
+error[E0599]: no method named `shl` found for struct `candle_core::Tensor` in the current scope
+   --> src\utils.rs:153:38
+    |
+153 |     let c = w.i(2 * step..3 * step)?.shl(2)?;
+    |                                      ^^^ method not found in `Tensor`
+
+error[E0599]: no method named `bitand` found for reference `&candle_core::Tensor` in the current scope
+   --> src\utils.rs:159:15
+    |
+159 |     let a = w.bitand(0b11000000u8)?.shr(6)?;
+    |               ^^^^^^
+    |
+help: there is a method `tanh` with a similar name, but with different arguments
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:578:5
+    |
+578 |     unary_op!(tanh, Tanh);
+    |     ^^^^^^^^^^^^^^^^^^^^^
+    = note: this error originates in the macro `unary_op` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: no method named `bitand` found for reference `&candle_core::Tensor` in the current scope
+   --> src\utils.rs:160:15
+    |
+160 |     let b = w.bitand(0b00110000u8)?.shr(4)?;
+    |               ^^^^^^
+    |
+help: there is a method `tanh` with a similar name, but with different arguments
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:578:5
+    |
+578 |     unary_op!(tanh, Tanh);
+    |     ^^^^^^^^^^^^^^^^^^^^^
+    = note: this error originates in the macro `unary_op` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: no method named `bitand` found for reference `&candle_core::Tensor` in the current scope
+   --> src\utils.rs:161:15
+    |
+161 |     let c = w.bitand(0b00001100u8)?.shr(2)?;
+    |               ^^^^^^
+    |
+help: there is a method `tanh` with a similar name, but with different arguments
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:578:5
+    |
+578 |     unary_op!(tanh, Tanh);
+    |     ^^^^^^^^^^^^^^^^^^^^^
+    = note: this error originates in the macro `unary_op` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: no method named `bitand` found for reference `&candle_core::Tensor` in the current scope
+   --> src\utils.rs:162:15
+    |
+162 |     let d = w.bitand(0b00000011u8)?;
+    |               ^^^^^^
+    |
+help: there is a method `tanh` with a similar name, but with different arguments
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:578:5
+    |
+578 |     unary_op!(tanh, Tanh);
+    |     ^^^^^^^^^^^^^^^^^^^^^
+    = note: this error originates in the macro `unary_op` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+   --> src\utils.rs:169:9
+    |
+169 |         bail!("Expected 2D tensor for 3-bit pack, got shape {:?}", shape);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |         |
+    |         expected `candle_core::Error`, found `anyhow::Error`
+    |         arguments to this enum variant are incorrect
+    |
+    = note: `anyhow::Error` and `candle_core::Error` have similar names, but are actually distinct types
+note: `anyhow::Error` is defined in crate `anyhow`
+   --> C:\Users\Lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anyhow-1.0.98\src\lib.rs:393:1
+    |
+393 | pub struct Error {
+    | ^^^^^^^^^^^^^^^^
+note: `candle_core::Error` is defined in crate `candle_core`
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\error.rs:20:1
+    |
+20  | pub enum Error {
+    | ^^^^^^^^^^^^^^
+help: the type constructed contains `anyhow::Error` due to the type of the argument passed
+   --> src\utils.rs:169:9
+    |
+169 |         bail!("Expected 2D tensor for 3-bit pack, got shape {:?}", shape);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this argument influences the type of `$crate`
+note: tuple variant defined here
+   --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\result.rs:537:5
+    |
+537 |     Err(#[stable(feature = "rust1", since = "1.0.0")] E),
+    |     ^^^
+    = note: this error originates in the macro `bail` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: no variant or associated item named `I32` found for enum `DType` in the current scope
+   --> src\utils.rs:176:58
+    |
+176 |     let mut padded = Tensor::zeros((padded_n, d), DType::I32, device)?;
+    |                                                          ^^^ variant or associated item not found in `DType`
+    |
+help: there is a variant with a similar name
+    |
+176 |     let mut padded = Tensor::zeros((padded_n, d), DType::U32?;
+    |                                                          ~~~
+
+error[E0599]: no method named `copy_` found for struct `candle_core::Tensor` in the current scope
+    --> src\utils.rs:177:21
+     |
+177  |     padded.i(0..n)?.copy_(&w.to_dtype(DType::I32)?)?;
+     |                     ^^^^^
+     |
+help: there is a method `copy` with a similar name, but with different arguments
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:2083:5
+     |
+2083 |     pub fn copy(&self) -> Result<Tensor> {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no variant or associated item named `I32` found for enum `DType` in the current scope
+   --> src\utils.rs:177:46
+    |
+177 |     padded.i(0..n)?.copy_(&w.to_dtype(DType::I32)?)?;
+    |                                              ^^^ variant or associated item not found in `DType`
+    |
+help: there is a variant with a similar name
+    |
+177 |     padded.i(0..n)?.copy_(&w.to_dtype(DType::U32)?)?;
+    |                                              ~~~
+
+error[E0599]: no method named `shl` found for struct `candle_core::Tensor` in the current scope
+   --> src\utils.rs:180:41
+    |
+180 |     let mut packed = padded.i(0..step)?.shl(27)?;
+    |                                         ^^^ method not found in `Tensor`
+
+error[E0599]: no method named `shl` found for struct `candle_core::Tensor` in the current scope
+   --> src\utils.rs:184:38
+    |
+184 |         packed = packed.bitor(&chunk.shl(shift)?)?;
+    |                                      ^^^ method not found in `Tensor`
+
+error[E0599]: no method named `bitand_scalar` found for reference `&candle_core::Tensor` in the current scope
+   --> src\utils.rs:201:27
+    |
+201 |         parts.push(packed.bitand_scalar(mask)?.shr_scalar(shift)?);
+    |                           ^^^^^^^^^^^^^
+    |
+help: there is a method `to_scalar` with a similar name, but with different arguments
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:603:5
+    |
+603 |     pub fn to_scalar<S: crate::WithDType>(&self) -> Result<S> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `shl` found for struct `candle_core::Tensor` in the current scope
+   --> src\utils.rs:211:36
+    |
+211 |     let mut packed = w.i(0..step)?.shl(7)?;
+    |                                    ^^^ method not found in `Tensor`
+
+error[E0599]: no method named `shl` found for struct `candle_core::Tensor` in the current scope
+   --> src\utils.rs:213:63
+    |
+213 |         packed = packed.bitor(&w.i(i * step..(i + 1) * step)?.shl(7 - i as u32)?)?;
+    |                                                               ^^^ method not found in `Tensor`
+
+error[E0599]: no method named `bitand` found for reference `&candle_core::Tensor` in the current scope
+   --> src\utils.rs:223:23
+    |
+223 |         result.push(w.bitand(mask)?.shr((7 - i) as u32)?);
+    |                       ^^^^^^
+    |
+help: there is a method `tanh` with a similar name, but with different arguments
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:578:5
+    |
+578 |     unary_op!(tanh, Tanh);
+    |     ^^^^^^^^^^^^^^^^^^^^^
+    = note: this error originates in the macro `unary_op` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `&[usize; 2]: WithDType` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:44:17
+    |
+43  |             let mut mask = Tensor::full(
+    |                            ------------ required by a bound introduced by this call
+44  |                 &[sequence_length, target_length],
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `WithDType` is not implemented for `&[usize; 2]`
+    |
+    = help: the following other types implement trait `WithDType`:
+              f32
+              f64
+              half::bf16
+              half::f16
+              i64
+              u32
+              u8
+note: required by a bound in `candle_core::Tensor::full`
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:395:20
+    |
+395 |     pub fn full<D: crate::WithDType, S: Into<Shape>>(
+    |                    ^^^^^^^^^^^^^^^^ required by this bound in `Tensor::full`
+
+error[E0277]: the trait bound `Shape: From<f64>` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:45:17
+    |
+43  |             let mut mask = Tensor::full(
+    |                            ------------ required by a bound introduced by this call
+44  |                 &[sequence_length, target_length],
+45  |                 min_dtype as f64, // candle的full接受f64
+    |                 ^^^^^^^^^^^^^^^^ the trait `From<f64>` is not implemented for `Shape`
+    |
+    = help: the following other types implement trait `From<T>`:
+              `Shape` implements `From<&Shape>`
+              `Shape` implements `From<&[usize; C]>`
+              `Shape` implements `From<&[usize]>`
+              `Shape` implements `From<()>`
+              `Shape` implements `From<(usize, usize)>`
+              `Shape` implements `From<(usize, usize, usize)>`
+              `Shape` implements `From<(usize, usize, usize, usize)>`
+              `Shape` implements `From<(usize, usize, usize, usize, usize)>`
+            and 4 others
+    = note: required for `f64` to implement `Into<Shape>`
+note: required by a bound in `candle_core::Tensor::full`
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:395:41
+    |
+395 |     pub fn full<D: crate::WithDType, S: Into<Shape>>(
+    |                                         ^^^^^^^^^^^ required by this bound in `Tensor::full`
+
+error[E0599]: no method named `triu` found for struct `candle_core::Tensor` in the current scope
+  --> src\models\Qwen\modeling_qwen_moe.rs:50:29
+   |
+50 |                 mask = mask.triu(1)?; // 上三角，对角线为1
+   |                             ^^^^ method not found in `Tensor`
+
+error[E0599]: no method named `masked_fill` found for struct `candle_core::Tensor` in the current scope
+  --> src\models\Qwen\modeling_qwen_moe.rs:73:22
+   |
+71 |                   let filled = causal_mask
+   |  ______________________________-
+72 | |                     .i((.., .., .., 0..mask_length))?
+73 | |                     .masked_fill(&zero_mask, min_dtype as f64)?; // 注意类型转换
+   | |                     -^^^^^^^^^^^ method not found in `Tensor`
+   | |_____________________|
+   |
+
+error[E0599]: no method named `copy_` found for struct `candle_core::Tensor` in the current scope
+    --> src\models\Qwen\modeling_qwen_moe.rs:75:62
+     |
+75   |                 causal_mask.i((.., .., .., 0..mask_length))?.copy_(&filled)?;
+     |                                                              ^^^^^
+     |
+help: there is a method `copy` with a similar name, but with different arguments
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:2083:5
+     |
+2083 |     pub fn copy(&self) -> Result<Tensor> {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: the trait bound `&[usize; 2]: WithDType` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:83:13
+    |
+82  |         let mut mask = Tensor::full(
+    |                        ------------ required by a bound introduced by this call
+83  |             &[sequence_length, target_length],
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `WithDType` is not implemented for `&[usize; 2]`
+    |
+    = help: the following other types implement trait `WithDType`:
+              f32
+              f64
+              half::bf16
+              half::f16
+              i64
+              u32
+              u8
+note: required by a bound in `candle_core::Tensor::full`
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:395:20
+    |
+395 |     pub fn full<D: crate::WithDType, S: Into<Shape>>(
+    |                    ^^^^^^^^^^^^^^^^ required by this bound in `Tensor::full`
+
+error[E0277]: the trait bound `Shape: From<f64>` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:84:13
+    |
+82  |         let mut mask = Tensor::full(
+    |                        ------------ required by a bound introduced by this call
+83  |             &[sequence_length, target_length],
+84  |             min_dtype as f64,
+    |             ^^^^^^^^^^^^^^^^ the trait `From<f64>` is not implemented for `Shape`
+    |
+    = help: the following other types implement trait `From<T>`:
+              `Shape` implements `From<&Shape>`
+              `Shape` implements `From<&[usize; C]>`
+              `Shape` implements `From<&[usize]>`
+              `Shape` implements `From<()>`
+              `Shape` implements `From<(usize, usize)>`
+              `Shape` implements `From<(usize, usize, usize)>`
+              `Shape` implements `From<(usize, usize, usize, usize)>`
+              `Shape` implements `From<(usize, usize, usize, usize, usize)>`
+            and 4 others
+    = note: required for `f64` to implement `Into<Shape>`
+note: required by a bound in `candle_core::Tensor::full`
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:395:41
+    |
+395 |     pub fn full<D: crate::WithDType, S: Into<Shape>>(
+    |                                         ^^^^^^^^^^^ required by this bound in `Tensor::full`
+
+error[E0599]: no method named `triu` found for struct `candle_core::Tensor` in the current scope
+  --> src\models\Qwen\modeling_qwen_moe.rs:88:25
+   |
+88 |             mask = mask.triu(1)?;
+   |                         ^^^^ method not found in `Tensor`
+
+error[E0308]: mismatched types
+    --> src\models\Qwen\modeling_qwen_moe.rs:127:42
+     |
+127  |         let variance = hidden_states.pow(2.0)?.mean_last_dim_keepdim()?;
+     |                                      --- ^^^ expected `&Tensor`, found floating-point number
+     |                                      |
+     |                                      arguments to this method are incorrect
+     |
+note: method defined here
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:2650:12
+     |
+2650 |     pub fn pow(&self, rhs: &Tensor) -> Result<Self> {
+     |            ^^^
+
+error[E0599]: no method named `mean_last_dim_keepdim` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:127:48
+    |
+127 |         let variance = hidden_states.pow(2.0)?.mean_last_dim_keepdim()?;
+    |                                                ^^^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `mean_keepdim` with a similar name, but with different arguments
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:991:5
+    |
+991 |     pub fn mean_keepdim<D: Dims>(&self, mean_dims: D) -> Result<Self> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:150:43
+    |
+150 |         let inv_freq = (1f64 / base).powf(freqs.to_vec1::<f32>()?.iter().map(|&x| x / dim as f32).collect::<Vec<_>>())?
+    |                                      ---- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `f64`, found `Vec<f32>`
+    |                                      |
+    |                                      arguments to this method are incorrect
+    |
+    = note: expected type `f64`
+             found struct `Vec<f32>`
+note: method defined here
+   --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\std\src\f64.rs:338:12
+    |
+338 |     pub fn powf(self, n: f64) -> f64 {
+    |            ^^^^
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> src\models\Qwen\modeling_qwen_moe.rs:150:24
+    |
+150 |         let inv_freq = (1f64 / base).powf(freqs.to_vec1::<f32>()?.iter().map(|&x| x / dim as f32).collect::<Vec<_>>())?
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `f64`
+    |
+    = help: the trait `Try` is not implemented for `f64`
+
+error[E0277]: the trait bound `usize: std::ops::Neg` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:178:23
+    |
+178 |     let x1 = x.narrow(-1, 0, last / 2)?;
+    |                       ^^ the trait `std::ops::Neg` is not implemented for `usize`
+    |
+    = help: the following other types implement trait `std::ops::Neg`:
+              &f128
+              &f16
+              &f32
+              &f64
+              &i128
+              &i16
+              &i32
+              &i64
+            and 12 others
+
+error[E0277]: the trait bound `usize: std::ops::Neg` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:179:23
+    |
+179 |     let x2 = x.narrow(-1, last / 2, last / 2)?;
+    |                       ^^ the trait `std::ops::Neg` is not implemented for `usize`
+    |
+    = help: the following other types implement trait `std::ops::Neg`:
+              &f128
+              &f16
+              &f32
+              &f64
+              &i128
+              &i16
+              &i32
+              &i64
+            and 12 others
+
+error[E0277]: the trait bound `usize: std::ops::Neg` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:180:40
+    |
+180 |     Ok(Tensor::cat(&[&x2.neg()?, &x1], -1)?)
+    |                                        ^^ the trait `std::ops::Neg` is not implemented for `usize`
+    |
+    = help: the following other types implement trait `std::ops::Neg`:
+              &f128
+              &f16
+              &f32
+              &f64
+              &i128
+              &i16
+              &i32
+              &i64
+            and 12 others
+
+error[E0277]: the trait bound `&candle_core::Tensor: candle_core::shape::Dim` is not satisfied
+    --> src\models\Qwen\modeling_qwen_moe.rs:193:35
+     |
+193  |     let cos = cos.index_select(0, position_ids)?.unsqueeze(unsqueeze_dim)?;
+     |                   ------------    ^^^^^^^^^^^^ the trait `candle_core::shape::Dim` is not implemented for `&candle_core::Tensor`
+     |                   |
+     |                   required by a bound introduced by this call
+     |
+     = help: the following other types implement trait `candle_core::shape::Dim`:
+               D
+               usize
+note: required by a bound in `candle_core::Tensor::index_select`
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:1643:28
+     |
+1643 |     pub fn index_select<D: Dim>(&self, indexes: &Self, dim: D) -> Result<Self> {
+     |                            ^^^ required by this bound in `Tensor::index_select`
+
+error[E0308]: mismatched types
+    --> src\models\Qwen\modeling_qwen_moe.rs:193:32
+     |
+193  |     let cos = cos.index_select(0, position_ids)?.unsqueeze(unsqueeze_dim)?;
+     |                   ------------ ^ expected `&Tensor`, found integer
+     |                   |
+     |                   arguments to this method are incorrect
+     |
+note: method defined here
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:1643:12
+     |
+1643 |     pub fn index_select<D: Dim>(&self, indexes: &Self, dim: D) -> Result<Self> {
+     |            ^^^^^^^^^^^^
+
+error[E0277]: the trait bound `&candle_core::Tensor: candle_core::shape::Dim` is not satisfied
+    --> src\models\Qwen\modeling_qwen_moe.rs:194:35
+     |
+194  |     let sin = sin.index_select(0, position_ids)?.unsqueeze(unsqueeze_dim)?;
+     |                   ------------    ^^^^^^^^^^^^ the trait `candle_core::shape::Dim` is not implemented for `&candle_core::Tensor`
+     |                   |
+     |                   required by a bound introduced by this call
+     |
+     = help: the following other types implement trait `candle_core::shape::Dim`:
+               D
+               usize
+note: required by a bound in `candle_core::Tensor::index_select`
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:1643:28
+     |
+1643 |     pub fn index_select<D: Dim>(&self, indexes: &Self, dim: D) -> Result<Self> {
+     |                            ^^^ required by this bound in `Tensor::index_select`
+
+error[E0308]: mismatched types
+    --> src\models\Qwen\modeling_qwen_moe.rs:194:32
+     |
+194  |     let sin = sin.index_select(0, position_ids)?.unsqueeze(unsqueeze_dim)?;
+     |                   ------------ ^ expected `&Tensor`, found integer
+     |                   |
+     |                   arguments to this method are incorrect
+     |
+note: method defined here
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:1643:12
+     |
+1643 |     pub fn index_select<D: Dim>(&self, indexes: &Self, dim: D) -> Result<Self> {
+     |            ^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:209:5
+    |
+202 | pub fn repeat_kv(hidden_states: &Tensor, n_rep: usize) -> Result<Tensor> {
+    |                                                           -------------- expected `Result<candle_core::Tensor, anyhow::Error>` because of return type
+...
+209 |     expanded.reshape(&[b, num_kv_heads * n_rep, s, d])
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `anyhow::Error`, found `candle_core::Error`
+    |
+    = note: `candle_core::Error` and `anyhow::Error` have similar names, but are actually distinct types
+note: `candle_core::Error` is defined in crate `candle_core`
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\error.rs:20:1
+    |
+20  | pub enum Error {
+    | ^^^^^^^^^^^^^^
+note: `anyhow::Error` is defined in crate `anyhow`
+   --> C:\Users\Lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anyhow-1.0.98\src\lib.rs:393:1
+    |
+393 | pub struct Error {
+    | ^^^^^^^^^^^^^^^^
+help: use `?` to coerce and return an appropriate `Err`, and wrap the resulting value in `Ok` so the expression remains of type `Result`
+    |
+209 |     Ok(expanded.reshape(&[b, num_kv_heads * n_rep, s, d])?)
+    |     +++                                                  ++
+
+error[E0277]: the trait bound `&DynamicCache: modeling_qwen_moe::Cache` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:336:9
+    |
+336 |         Box::new(self.clone())
+    |         ^^^^^^^^^^^^^^^^^^^^^^ the trait `modeling_qwen_moe::Cache` is not implemented for `&DynamicCache`
+    |
+    = help: the trait `modeling_qwen_moe::Cache` is implemented for `DynamicCache`
+    = note: required for the cast from `Box<&DynamicCache>` to `Box<(dyn modeling_qwen_moe::Cache + 'static)>`
+
+error[E0599]: no function or associated item named `load` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:398:26
+    |
+398 |     let weight = Tensor::load(&format!("{}/{}.weight", prefix, name), device)?;
+    |                          ^^^^ function or associated item not found in `Tensor`
+    |
+note: if you're trying to build a new `candle_core::Tensor` consider using one of the following associated functions:
+      npy::<impl candle_core::Tensor>::read_npy
+      safetensors::<impl candle_core::Tensor>::from_raw_buffer
+      candle_core::Tensor::ones
+      candle_core::Tensor::zeros
+      and 14 others
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\safetensors.rs:192:5
+    |
+192 | /     pub fn from_raw_buffer(
+193 | |         data: &[u8],
+194 | |         dtype: DType,
+195 | |         shape: &[usize],
+196 | |         device: &Device,
+197 | |     ) -> Result<Self> {
+    | |_____________________^
+    |
+   ::: C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\npy.rs:246:5
+    |
+246 |       pub fn read_npy<T: AsRef<Path>>(path: T) -> Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:203:5
+    |
+203 |       pub fn ones<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+255 |       pub fn zeros<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no function or associated item named `load` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:399:24
+    |
+399 |     let bias = Tensor::load(&format!("{}/{}.bias", prefix, name), device)?;
+    |                        ^^^^ function or associated item not found in `Tensor`
+    |
+note: if you're trying to build a new `candle_core::Tensor` consider using one of the following associated functions:
+      npy::<impl candle_core::Tensor>::read_npy
+      safetensors::<impl candle_core::Tensor>::from_raw_buffer
+      candle_core::Tensor::ones
+      candle_core::Tensor::zeros
+      and 14 others
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\safetensors.rs:192:5
+    |
+192 | /     pub fn from_raw_buffer(
+193 | |         data: &[u8],
+194 | |         dtype: DType,
+195 | |         shape: &[usize],
+196 | |         device: &Device,
+197 | |     ) -> Result<Self> {
+    | |_____________________^
+    |
+   ::: C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\npy.rs:246:5
+    |
+246 |       pub fn read_npy<T: AsRef<Path>>(path: T) -> Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:203:5
+    |
+203 |       pub fn ones<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+255 |       pub fn zeros<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no function or associated item named `load` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:404:26
+    |
+404 |     let weight = Tensor::load(&format!("{}/{}.weight", prefix, name), device)?;
+    |                          ^^^^ function or associated item not found in `Tensor`
+    |
+note: if you're trying to build a new `candle_core::Tensor` consider using one of the following associated functions:
+      npy::<impl candle_core::Tensor>::read_npy
+      safetensors::<impl candle_core::Tensor>::from_raw_buffer
+      candle_core::Tensor::ones
+      candle_core::Tensor::zeros
+      and 14 others
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\safetensors.rs:192:5
+    |
+192 | /     pub fn from_raw_buffer(
+193 | |         data: &[u8],
+194 | |         dtype: DType,
+195 | |         shape: &[usize],
+196 | |         device: &Device,
+197 | |     ) -> Result<Self> {
+    | |_____________________^
+    |
+   ::: C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\npy.rs:246:5
+    |
+246 |       pub fn read_npy<T: AsRef<Path>>(path: T) -> Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:203:5
+    |
+203 |       pub fn ones<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+255 |       pub fn zeros<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:504:101
+    |
+504 |         let (mut query, mut key_out) = apply_rotary_pos_emb(&query, &key, &cos, &sin, position_ids, 1)?;
+    |                                        --------------------                                         ^ expected `Option<usize>`, found integer
+    |                                        |
+    |                                        arguments to this function are incorrect
+    |
+    = note: expected enum `Option<usize>`
+               found type `{integer}`
+note: function defined here
+   --> src\models\Qwen\modeling_qwen_moe.rs:183:8
+    |
+183 | pub fn apply_rotary_pos_emb(
+    |        ^^^^^^^^^^^^^^^^^^^^
+...
+189 |     unsqueeze_dim: Option<usize>, // 改为可选参数
+    |     ----------------------------
+help: try wrapping the expression in `Some`
+    |
+504 |         let (mut query, mut key_out) = apply_rotary_pos_emb(&query, &key, &cos, &sin, position_ids, Some(1))?;
+    |                                                                                                     +++++ +
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:518:51
+    |
+518 |         attn_weights = attn_weights.broadcast_div((self.head_dim as f64).sqrt())?;
+    |                                     ------------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `&Tensor`, found `f64`
+    |                                     |
+    |                                     arguments to this method are incorrect
+    |
+note: method defined here
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:562:26
+    |
+562 |     broadcast_binary_op!(broadcast_div, div);
+    |                          ^^^^^^^^^^^^^
+
+error[E0599]: no method named `softmax` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:525:41
+    |
+525 |         let attn_weights = attn_weights.softmax(candle_core::D::Minus1)?;
+    |                                         ^^^^^^^ method not found in `Tensor`
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:547:62
+    |
+547 |         let base = Qwen2MoeAttention::new(config, layer_idx, &device)?;
+    |                    ----------------------                    ^^^^^^^ expected `&Device`, found `&Option<Device>`
+    |                    |
+    |                    arguments to this function are incorrect
+    |
+    = note: expected reference `&candle_core::Device`
+               found reference `&Option<candle_core::Device>`
+note: associated function defined here
+   --> src\models\Qwen\modeling_qwen_moe.rs:428:12
+    |
+428 |     pub fn new(
+    |            ^^^
+...
+431 |         device: &Device,
+    |         ---------------
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:575:101
+    |
+575 |         let (mut query, mut key_out) = apply_rotary_pos_emb(&query, &key, &cos, &sin, position_ids, 1)?;
+    |                                        --------------------                                         ^ expected `Option<usize>`, found integer
+    |                                        |
+    |                                        arguments to this function are incorrect
+    |
+    = note: expected enum `Option<usize>`
+               found type `{integer}`
+note: function defined here
+   --> src\models\Qwen\modeling_qwen_moe.rs:183:8
+    |
+183 | pub fn apply_rotary_pos_emb(
+    |        ^^^^^^^^^^^^^^^^^^^^
+...
+189 |     unsqueeze_dim: Option<usize>, // 改为可选参数
+    |     ----------------------------
+help: try wrapping the expression in `Some`
+    |
+575 |         let (mut query, mut key_out) = apply_rotary_pos_emb(&query, &key, &cos, &sin, position_ids, Some(1))?;
+    |                                                                                                     +++++ +
+
+error[E0277]: the trait bound `usize: std::ops::Neg` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:621:56
+    |
+621 |     let mut attn_weights = query.matmul(&key.transpose(-2, -1)?)?;
+    |                                                        ^^ the trait `std::ops::Neg` is not implemented for `usize`
+    |
+    = help: the following other types implement trait `std::ops::Neg`:
+              &f128
+              &f16
+              &f32
+              &f64
+              &i128
+              &i16
+              &i32
+              &i64
+            and 12 others
+
+error[E0277]: the trait bound `usize: std::ops::Neg` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:621:60
+    |
+621 |     let mut attn_weights = query.matmul(&key.transpose(-2, -1)?)?;
+    |                                                            ^^ the trait `std::ops::Neg` is not implemented for `usize`
+    |
+    = help: the following other types implement trait `std::ops::Neg`:
+              &f128
+              &f16
+              &f32
+              &f64
+              &i128
+              &i16
+              &i32
+              &i64
+            and 12 others
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:622:47
+    |
+622 |     attn_weights = attn_weights.broadcast_mul(scale)?;
+    |                                 ------------- ^^^^^ expected `&Tensor`, found `f64`
+    |                                 |
+    |                                 arguments to this method are incorrect
+    |
+note: method defined here
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:560:26
+    |
+560 |     broadcast_binary_op!(broadcast_mul, mul);
+    |                          ^^^^^^^^^^^^^
+
+error[E0599]: no function or associated item named `tril` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:632:35
+    |
+632 |         let causal_mask = Tensor::tril(seq_len, seq_len, query.device())?
+    |                                   ^^^^ function or associated item not found in `Tensor`
+    |
+note: if you're trying to build a new `candle_core::Tensor` consider using one of the following associated functions:
+      npy::<impl candle_core::Tensor>::read_npy
+      safetensors::<impl candle_core::Tensor>::from_raw_buffer
+      candle_core::Tensor::ones
+      candle_core::Tensor::zeros
+      and 14 others
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\safetensors.rs:192:5
+    |
+192 | /     pub fn from_raw_buffer(
+193 | |         data: &[u8],
+194 | |         dtype: DType,
+195 | |         shape: &[usize],
+196 | |         device: &Device,
+197 | |     ) -> Result<Self> {
+    | |_____________________^
+    |
+   ::: C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\npy.rs:246:5
+    |
+246 |       pub fn read_npy<T: AsRef<Path>>(path: T) -> Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:203:5
+    |
+203 |       pub fn ones<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+255 |       pub fn zeros<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is an associated function `tril2` with a similar name
+    |
+632 |         let causal_mask = Tensor::tril2(seq_len, seq_len, query.device())?
+    |                                   ~~~~~
+
+error[E0599]: no method named `as_slice` found for reference `&[usize]` in the current scope
+    --> src\models\Qwen\modeling_qwen_moe.rs:638:41
+     |
+638  |         let neg_inf = Tensor::full(dims.as_slice(), f64::NEG_INFINITY, query.device())?;
+     |                                         ^^^^^^^^
+     |
+     = help: items from traits can only be used if the trait is in scope
+help: there is a method `slice` with a similar name, but with different arguments
+    --> C:\Users\Lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\nom-7.1.3\src\traits.rs:1008:3
+     |
+1008 |   fn slice(&self, range: R) -> Self;
+     |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: trait `SlicePattern` which provides `as_slice` is implemented but not in scope; perhaps you want to import it
+     |
+1    + use core::slice::SlicePattern;
+     |
+
+error[E0277]: the trait bound `Shape: From<f64>` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:638:53
+    |
+638 |         let neg_inf = Tensor::full(dims.as_slice(), f64::NEG_INFINITY, query.device())?;
+    |                       ------------                  ^^^^^^^^^^^^^^^^^ the trait `From<f64>` is not implemented for `Shape`
+    |                       |
+    |                       required by a bound introduced by this call
+    |
+    = help: the following other types implement trait `From<T>`:
+              `Shape` implements `From<&Shape>`
+              `Shape` implements `From<&[usize; C]>`
+              `Shape` implements `From<&[usize]>`
+              `Shape` implements `From<()>`
+              `Shape` implements `From<(usize, usize)>`
+              `Shape` implements `From<(usize, usize, usize)>`
+              `Shape` implements `From<(usize, usize, usize, usize)>`
+              `Shape` implements `From<(usize, usize, usize, usize, usize)>`
+            and 4 others
+    = note: required for `f64` to implement `Into<Shape>`
+note: required by a bound in `candle_core::Tensor::full`
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:395:41
+    |
+395 |     pub fn full<D: crate::WithDType, S: Into<Shape>>(
+    |                                         ^^^^^^^^^^^ required by this bound in `Tensor::full`
+
+error[E0599]: no method named `softmax` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:645:33
+    |
+645 |     attn_weights = attn_weights.softmax(D::Minus1)?;
+    |                                 ^^^^^^^ method not found in `Tensor`
+
+error[E0599]: no method named `dropout` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:649:37
+    |
+649 |         attn_weights = attn_weights.dropout(dropout_p)?;
+    |                                     ^^^^^^^ method not found in `Tensor`
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:659:5
+    |
+658 | pub fn silu(x: &Tensor) -> Result<Tensor> {
+    |                            -------------- expected `Result<candle_core::Tensor, anyhow::Error>` because of return type
+659 |     x.silu()
+    |     ^^^^^^^^ expected `anyhow::Error`, found `candle_core::Error`
+    |
+    = note: `candle_core::Error` and `anyhow::Error` have similar names, but are actually distinct types
+note: `candle_core::Error` is defined in crate `candle_core`
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\error.rs:20:1
+    |
+20  | pub enum Error {
+    | ^^^^^^^^^^^^^^
+note: `anyhow::Error` is defined in crate `anyhow`
+   --> C:\Users\Lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anyhow-1.0.98\src\lib.rs:393:1
+    |
+393 | pub struct Error {
+    | ^^^^^^^^^^^^^^^^
+help: use `?` to coerce and return an appropriate `Err`, and wrap the resulting value in `Ok` so the expression remains of type `Result`
+    |
+659 |     Ok(x.silu()?)
+    |     +++        ++
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:663:5
+    |
+662 | pub fn gelu(x: &Tensor) -> Result<Tensor> {
+    |                            -------------- expected `Result<candle_core::Tensor, anyhow::Error>` because of return type
+663 |     x.gelu()
+    |     ^^^^^^^^ expected `anyhow::Error`, found `candle_core::Error`
+    |
+    = note: `candle_core::Error` and `anyhow::Error` have similar names, but are actually distinct types
+note: `candle_core::Error` is defined in crate `candle_core`
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\error.rs:20:1
+    |
+20  | pub enum Error {
+    | ^^^^^^^^^^^^^^
+note: `anyhow::Error` is defined in crate `anyhow`
+   --> C:\Users\Lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anyhow-1.0.98\src\lib.rs:393:1
+    |
+393 | pub struct Error {
+    | ^^^^^^^^^^^^^^^^
+help: use `?` to coerce and return an appropriate `Err`, and wrap the resulting value in `Ok` so the expression remains of type `Result`
+    |
+663 |     Ok(x.gelu()?)
+    |     +++        ++
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:667:5
+    |
+666 | pub fn relu(x: &Tensor) -> Result<Tensor> {
+    |                            -------------- expected `Result<candle_core::Tensor, anyhow::Error>` because of return type
+667 |     x.relu()
+    |     ^^^^^^^^ expected `anyhow::Error`, found `candle_core::Error`
+    |
+    = note: `candle_core::Error` and `anyhow::Error` have similar names, but are actually distinct types
+note: `candle_core::Error` is defined in crate `candle_core`
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\error.rs:20:1
+    |
+20  | pub enum Error {
+    | ^^^^^^^^^^^^^^
+note: `anyhow::Error` is defined in crate `anyhow`
+   --> C:\Users\Lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anyhow-1.0.98\src\lib.rs:393:1
+    |
+393 | pub struct Error {
+    | ^^^^^^^^^^^^^^^^
+help: use `?` to coerce and return an appropriate `Err`, and wrap the resulting value in `Ok` so the expression remains of type `Result`
+    |
+667 |     Ok(x.relu()?)
+    |     +++        ++
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:676:18
+    |
+676 |         _ => Err(candle_core::Error::Msg(format!("Unsupported activation: {}", name))),
+    |              --- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `anyhow::Error`, found `candle_core::Error`
+    |              |
+    |              arguments to this enum variant are incorrect
+    |
+    = note: `candle_core::Error` and `anyhow::Error` have similar names, but are actually distinct types
+note: `candle_core::Error` is defined in crate `candle_core`
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\error.rs:20:1
+    |
+20  | pub enum Error {
+    | ^^^^^^^^^^^^^^
+note: `anyhow::Error` is defined in crate `anyhow`
+   --> C:\Users\Lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anyhow-1.0.98\src\lib.rs:393:1
+    |
+393 | pub struct Error {
+    | ^^^^^^^^^^^^^^^^
+help: the type constructed contains `candle_core::Error` due to the type of the argument passed
+   --> src\models\Qwen\modeling_qwen_moe.rs:676:14
+    |
+676 |         _ => Err(candle_core::Error::Msg(format!("Unsupported activation: {}", name))),
+    |              ^^^^--------------------------------------------------------------------^
+    |                  |
+    |                  this argument influences the type of `Err`
+note: tuple variant defined here
+   --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\result.rs:537:5
+    |
+537 |     Err(#[stable(feature = "rust1", since = "1.0.0")] E),
+    |     ^^^
+help: call `Into::into` on this expression to convert `candle_core::Error` into `anyhow::Error`
+    |
+676 |         _ => Err(candle_core::Error::Msg(format!("Unsupported activation: {}", name)).into()),
+    |                                                                                      +++++++
+
+error[E0599]: no function or associated item named `from_bytes` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:704:30
+    |
+704 |         let tensor = Tensor::from_bytes(st.data(), dtype, &shape, device)?;
+    |                              ^^^^^^^^^^ function or associated item not found in `Tensor`
+    |
+note: if you're trying to build a new `candle_core::Tensor` consider using one of the following associated functions:
+      npy::<impl candle_core::Tensor>::read_npy
+      safetensors::<impl candle_core::Tensor>::from_raw_buffer
+      candle_core::Tensor::ones
+      candle_core::Tensor::zeros
+      and 14 others
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\safetensors.rs:192:5
+    |
+192 | /     pub fn from_raw_buffer(
+193 | |         data: &[u8],
+194 | |         dtype: DType,
+195 | |         shape: &[usize],
+196 | |         device: &Device,
+197 | |     ) -> Result<Self> {
+    | |_____________________^
+    |
+   ::: C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\npy.rs:246:5
+    |
+246 |       pub fn read_npy<T: AsRef<Path>>(path: T) -> Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:203:5
+    |
+203 |       pub fn ones<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+255 |       pub fn zeros<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is an associated function `from_iter` with a similar name
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:416:5
+    |
+416 | /     pub fn from_iter<D: crate::WithDType>(
+417 | |         iter: impl IntoIterator<Item = D>,
+418 | |         device: &Device,
+419 | |     ) -> Result<Self> {
+    | |_____________________^
+
+error[E0608]: cannot index into a value of type `Option<HashMap<usize, usize>>`
+   --> src\models\Qwen\modeling_qwen_moe.rs:755:28
+    |
+755 |             config.quan_map[layer_idx]
+    |                            ^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:771:13
+    |
+771 |             act_fn,
+    |             ^^^^^^ expected `dyn std::error::Error`, found `anyhow::Error`
+    |
+    = note: expected fn pointer `for<'a> fn(&'a candle_core::Tensor) -> Result<_, (dyn std::error::Error + 'static)>`
+               found fn pointer `for<'a> fn(&'a candle_core::Tensor) -> Result<_, anyhow::Error>`
+
+error[E0277]: the size for values of type `(dyn std::error::Error + 'static)` cannot be known at compilation time
+   --> src\models\Qwen\modeling_qwen_moe.rs:771:13
+    |
+771 |             act_fn,
+    |             ^^^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `(dyn std::error::Error + 'static)`
+note: required by an implicit `Sized` bound in `Result`
+   --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\result.rs:528:20
+    |
+528 | pub enum Result<T, E> {
+    |                    ^ required by the implicit `Sized` requirement on this type parameter in `Result`
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:790:86
+    |
+790 |             self.gate = Some(load_file(&format!("{}.gate_proj.weight", path_prefix), device)?);
+    |                              --------- arguments to this function are incorrect      ^^^^^^ expected `&Device`, found `&Option<Device>`
+    |
+    = note: expected reference `&candle_core::Device`
+               found reference `&Option<candle_core::Device>`
+note: function defined here
+   --> src\models\Qwen\modeling_qwen_moe.rs:999:8
+    |
+999 | pub fn load_file(path: &str, device: &Device) -> Result<Tensor> {
+    |        ^^^^^^^^^             ---------------
+
+error[E0308]: `?` operator has incompatible types
+   --> src\models\Qwen\modeling_qwen_moe.rs:790:30
+    |
+790 |             self.gate = Some(load_file(&format!("{}.gate_proj.weight", path_prefix), device)?);
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `TensorOrMap`, found `Tensor`
+    |
+    = note: `?` operator cannot convert from `candle_core::Tensor` to `TensorOrMap`
+help: try wrapping the expression in `models::Qwen::modeling_qwen_moe::TensorOrMap::Single`
+    |
+790 |             self.gate = Some(models::Qwen::modeling_qwen_moe::TensorOrMap::Single(load_file(&format!("{}.gate_proj.weight", path_prefix), device)?));
+    |                              +++++++++++++++++++++++++++++++++++++++++++++++++++++                                                                +
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:791:82
+    |
+791 |             self.up = Some(load_file(&format!("{}.up_proj.weight", path_prefix), device)?);
+    |                            --------- arguments to this function are incorrect    ^^^^^^ expected `&Device`, found `&Option<Device>`
+    |
+    = note: expected reference `&candle_core::Device`
+               found reference `&Option<candle_core::Device>`
+note: function defined here
+   --> src\models\Qwen\modeling_qwen_moe.rs:999:8
+    |
+999 | pub fn load_file(path: &str, device: &Device) -> Result<Tensor> {
+    |        ^^^^^^^^^             ---------------
+
+error[E0308]: `?` operator has incompatible types
+   --> src\models\Qwen\modeling_qwen_moe.rs:791:28
+    |
+791 |             self.up = Some(load_file(&format!("{}.up_proj.weight", path_prefix), device)?);
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `TensorOrMap`, found `Tensor`
+    |
+    = note: `?` operator cannot convert from `candle_core::Tensor` to `TensorOrMap`
+help: try wrapping the expression in `models::Qwen::modeling_qwen_moe::TensorOrMap::Single`
+    |
+791 |             self.up = Some(models::Qwen::modeling_qwen_moe::TensorOrMap::Single(load_file(&format!("{}.up_proj.weight", path_prefix), device)?));
+    |                            +++++++++++++++++++++++++++++++++++++++++++++++++++++                                                              +
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:792:86
+    |
+792 |             self.down = Some(load_file(&format!("{}.down_proj.weight", path_prefix), device)?);
+    |                              --------- arguments to this function are incorrect      ^^^^^^ expected `&Device`, found `&Option<Device>`
+    |
+    = note: expected reference `&candle_core::Device`
+               found reference `&Option<candle_core::Device>`
+note: function defined here
+   --> src\models\Qwen\modeling_qwen_moe.rs:999:8
+    |
+999 | pub fn load_file(path: &str, device: &Device) -> Result<Tensor> {
+    |        ^^^^^^^^^             ---------------
+
+error[E0308]: `?` operator has incompatible types
+   --> src\models\Qwen\modeling_qwen_moe.rs:792:30
+    |
+792 |             self.down = Some(load_file(&format!("{}.down_proj.weight", path_prefix), device)?);
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `TensorOrMap`, found `Tensor`
+    |
+    = note: `?` operator cannot convert from `candle_core::Tensor` to `TensorOrMap`
+help: try wrapping the expression in `models::Qwen::modeling_qwen_moe::TensorOrMap::Single`
+    |
+792 |             self.down = Some(models::Qwen::modeling_qwen_moe::TensorOrMap::Single(load_file(&format!("{}.down_proj.weight", path_prefix), device)?));
+    |                              +++++++++++++++++++++++++++++++++++++++++++++++++++++                                                                +
+
+error[E0599]: no method named `pin_memory` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:804:74
+    |
+804 |                 let gate = weights.remove("gate").ok_or("missing gate")?.pin_memory();
+    |                                                                          ^^^^^^^^^^ method not found in `Tensor`
+
+error[E0599]: no method named `pin_memory` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:805:68
+    |
+805 |                 let up = weights.remove("up").ok_or("missing up")?.pin_memory();
+    |                                                                    ^^^^^^^^^^ method not found in `Tensor`
+
+error[E0599]: no method named `pin_memory` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:806:74
+    |
+806 |                 let down = weights.remove("down").ok_or("missing down")?.pin_memory();
+    |                                                                          ^^^^^^^^^^ method not found in `Tensor`
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:836:87
+    |
+836 |                     self.gate = Some(clone_tensor_set(&self.gate_cpu[&self.quan_bit], device)?);
+    |                                      ----------------                                 ^^^^^^ expected `&Device`, found `&Option<Device>`
+    |                                      |
+    |                                      arguments to this function are incorrect
+    |
+    = note: expected reference `&candle_core::Device`
+               found reference `&Option<candle_core::Device>`
+note: function defined here
+   --> src\models\Qwen\modeling_qwen_moe.rs:711:4
+    |
+711 | fn clone_tensor_set(set: &TensorSet, device: &Device) -> Result<TensorOrMap> {
+    |    ^^^^^^^^^^^^^^^^                  ---------------
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:837:83
+    |
+837 |                     self.up = Some(clone_tensor_set(&self.up_cpu[&self.quan_bit], device)?);
+    |                                    ----------------                               ^^^^^^ expected `&Device`, found `&Option<Device>`
+    |                                    |
+    |                                    arguments to this function are incorrect
+    |
+    = note: expected reference `&candle_core::Device`
+               found reference `&Option<candle_core::Device>`
+note: function defined here
+   --> src\models\Qwen\modeling_qwen_moe.rs:711:4
+    |
+711 | fn clone_tensor_set(set: &TensorSet, device: &Device) -> Result<TensorOrMap> {
+    |    ^^^^^^^^^^^^^^^^                  ---------------
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:838:87
+    |
+838 |                     self.down = Some(clone_tensor_set(&self.down_cpu[&self.quan_bit], device)?);
+    |                                      ----------------                                 ^^^^^^ expected `&Device`, found `&Option<Device>`
+    |                                      |
+    |                                      arguments to this function are incorrect
+    |
+    = note: expected reference `&candle_core::Device`
+               found reference `&Option<candle_core::Device>`
+note: function defined here
+   --> src\models\Qwen\modeling_qwen_moe.rs:711:4
+    |
+711 | fn clone_tensor_set(set: &TensorSet, device: &Device) -> Result<TensorOrMap> {
+    |    ^^^^^^^^^^^^^^^^                  ---------------
+
+error[E0599]: no method named `pin_memory` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:855:54
+    |
+855 |                 "nbits".to_string() => get("nbits")?.pin_memory(),
+    |                                                      ^^^^^^^^^^ method not found in `Tensor`
+
+error[E0599]: no method named `pin_memory` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:856:54
+    |
+856 |                 "shape".to_string() => get("shape")?.pin_memory(),
+    |                                                      ^^^^^^^^^^ method not found in `Tensor`
+
+error[E0599]: no method named `pin_memory` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:857:42
+    |
+857 |                 "W_q".to_string() => w_q.pin_memory(),
+    |                                          ^^^^^^^^^^ method not found in `Tensor`
+
+error[E0599]: no method named `pin_memory` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:858:54
+    |
+858 |                 "scale".to_string() => get("scale")?.pin_memory(),
+    |                                                      ^^^^^^^^^^ method not found in `Tensor`
+
+error[E0599]: no method named `pin_memory` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:859:52
+    |
+859 |                 "zero".to_string() => get("zero")?.pin_memory(),
+    |                                                    ^^^^^^^^^^ method not found in `Tensor`
+
+error[E0599]: no method named `pin_memory` found for struct `candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:863:56
+    |
+863 |                 "weight".to_string() => get("weight")?.pin_memory()
+    |                                                        ^^^^^^^^^^ method not found in `Tensor`
+
+error[E0277]: the trait bound `str: std::error::Error` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:880:46
+    |
+880 |                 .ok_or("Missing key: weight")?;
+    |                                              ^ the trait `std::error::Error` is not implemented for `str`
+    |
+    = help: the trait `FromResidual<Result<Infallible, E>>` is implemented for `Result<T, F>`
+    = note: required for `&str` to implement `std::error::Error`
+    = note: required for `anyhow::Error` to implement `From<&str>`
+    = note: required for `Result<TensorOrMap, anyhow::Error>` to implement `FromResidual<Result<Infallible, &str>>`
+
+error[E0308]: mismatched types
+    --> src\models\Qwen\modeling_qwen_moe.rs:881:53
+     |
+881  |             Ok(TensorOrMap::Single(tensor.to_device(device)?))
+     |                                           --------- ^^^^^^ expected `&Device`, found `&Option<Device>`
+     |                                           |
+     |                                           arguments to this method are incorrect
+     |
+     = note: expected reference `&candle_core::Device`
+                found reference `&Option<candle_core::Device>`
+note: method defined here
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:2119:12
+     |
+2119 |     pub fn to_device(&self, device: &Device) -> Result<Tensor> {
+     |            ^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src\models\Qwen\modeling_qwen_moe.rs:888:33
+     |
+888  |                     v.to_device(device)?
+     |                       --------- ^^^^^^ expected `&Device`, found `&Option<Device>`
+     |                       |
+     |                       arguments to this method are incorrect
+     |
+     = note: expected reference `&candle_core::Device`
+                found reference `&Option<candle_core::Device>`
+note: method defined here
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:2119:12
+     |
+2119 |     pub fn to_device(&self, device: &Device) -> Result<Tensor> {
+     |            ^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:898:39
+    |
+898 |         let quan_bit = nbit.unwrap_or(self.quan_bit);
+    |                             --------- ^^^^^^^^^^^^^ expected `usize`, found `u8`
+    |                             |
+    |                             arguments to this method are incorrect
+    |
+help: the return type of this call is `u8` due to the type of the argument passed
+   --> src\models\Qwen\modeling_qwen_moe.rs:898:24
+    |
+898 |         let quan_bit = nbit.unwrap_or(self.quan_bit);
+    |                        ^^^^^^^^^^^^^^^-------------^
+    |                                       |
+    |                                       this argument influences the return type of `unwrap_or`
+note: method defined here
+   --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:998:12
+    |
+998 |     pub fn unwrap_or(self, default: T) -> T {
+    |            ^^^^^^^^^
+help: you can convert a `u8` to a `usize`
+    |
+898 |         let quan_bit = nbit.unwrap_or(self.quan_bit.into());
+    |                                                    +++++++
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:901:67
+    |
+901 |             self.gate = Some(self.load_from_cpu(self.gate_cpu.get(&quan_bit).ok_or("Missing gate")?)?);
+    |                                                               --- ^^^^^^^^^ expected `&u8`, found `&usize`
+    |                                                               |
+    |                                                               arguments to this method are incorrect
+    |
+    = note: expected reference `&u8`
+               found reference `&usize`
+note: method defined here
+   --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\std\src\collections\hash\map.rs:897:12
+    |
+897 |     pub fn get<Q: ?Sized>(&self, k: &Q) -> Option<&V>
+    |            ^^^
+
+error[E0277]: the trait bound `str: std::error::Error` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:901:99
+    |
+901 |             self.gate = Some(self.load_from_cpu(self.gate_cpu.get(&quan_bit).ok_or("Missing gate")?)?);
+    |                                                                                                   ^ the trait `std::error::Error` is not implemented for `str`
+    |
+    = help: the trait `FromResidual<Result<Infallible, E>>` is implemented for `Result<T, F>`
+    = note: required for `&str` to implement `std::error::Error`
+    = note: required for `anyhow::Error` to implement `From<&str>`
+    = note: required for `Result<(), anyhow::Error>` to implement `FromResidual<Result<Infallible, &str>>`
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:902:63
+    |
+902 |             self.up = Some(self.load_from_cpu(self.up_cpu.get(&quan_bit).ok_or("Missing up")?)?);
+    |                                                           --- ^^^^^^^^^ expected `&u8`, found `&usize`
+    |                                                           |
+    |                                                           arguments to this method are incorrect
+    |
+    = note: expected reference `&u8`
+               found reference `&usize`
+note: method defined here
+   --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\std\src\collections\hash\map.rs:897:12
+    |
+897 |     pub fn get<Q: ?Sized>(&self, k: &Q) -> Option<&V>
+    |            ^^^
+
+error[E0277]: the trait bound `str: std::error::Error` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:902:93
+    |
+902 |             self.up = Some(self.load_from_cpu(self.up_cpu.get(&quan_bit).ok_or("Missing up")?)?);
+    |                                                                                             ^ the trait `std::error::Error` is not implemented for `str`
+    |
+    = help: the trait `FromResidual<Result<Infallible, E>>` is implemented for `Result<T, F>`
+    = note: required for `&str` to implement `std::error::Error`
+    = note: required for `anyhow::Error` to implement `From<&str>`
+    = note: required for `Result<(), anyhow::Error>` to implement `FromResidual<Result<Infallible, &str>>`
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:903:67
+    |
+903 |             self.down = Some(self.load_from_cpu(self.down_cpu.get(&quan_bit).ok_or("Missing down")?)?);
+    |                                                               --- ^^^^^^^^^ expected `&u8`, found `&usize`
+    |                                                               |
+    |                                                               arguments to this method are incorrect
+    |
+    = note: expected reference `&u8`
+               found reference `&usize`
+note: method defined here
+   --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\std\src\collections\hash\map.rs:897:12
+    |
+897 |     pub fn get<Q: ?Sized>(&self, k: &Q) -> Option<&V>
+    |            ^^^
+
+error[E0277]: the trait bound `str: std::error::Error` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:903:99
+    |
+903 |             self.down = Some(self.load_from_cpu(self.down_cpu.get(&quan_bit).ok_or("Missing down")?)?);
+    |                                                                                                   ^ the trait `std::error::Error` is not implemented for `str`
+    |
+    = help: the trait `FromResidual<Result<Infallible, E>>` is implemented for `Result<T, F>`
+    = note: required for `&str` to implement `std::error::Error`
+    = note: required for `anyhow::Error` to implement `From<&str>`
+    = note: required for `Result<(), anyhow::Error>` to implement `FromResidual<Result<Infallible, &str>>`
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:905:42
+    |
+905 |             let gate = self.gate_cpu.get(&quan_bit).cloned().ok_or("Missing gate")?;
+    |                                      --- ^^^^^^^^^ expected `&u8`, found `&usize`
+    |                                      |
+    |                                      arguments to this method are incorrect
+    |
+    = note: expected reference `&u8`
+               found reference `&usize`
+note: method defined here
+   --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\std\src\collections\hash\map.rs:897:12
+    |
+897 |     pub fn get<Q: ?Sized>(&self, k: &Q) -> Option<&V>
+    |            ^^^
+
+error[E0277]: the trait bound `str: std::error::Error` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:905:83
+    |
+905 |             let gate = self.gate_cpu.get(&quan_bit).cloned().ok_or("Missing gate")?;
+    |                                                                                   ^ the trait `std::error::Error` is not implemented for `str`
+    |
+    = help: the trait `FromResidual<Result<Infallible, E>>` is implemented for `Result<T, F>`
+    = note: required for `&str` to implement `std::error::Error`
+    = note: required for `anyhow::Error` to implement `From<&str>`
+    = note: required for `Result<(), anyhow::Error>` to implement `FromResidual<Result<Infallible, &str>>`
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:906:38
+    |
+906 |             let up = self.up_cpu.get(&quan_bit).cloned().ok_or("Missing up")?;
+    |                                  --- ^^^^^^^^^ expected `&u8`, found `&usize`
+    |                                  |
+    |                                  arguments to this method are incorrect
+    |
+    = note: expected reference `&u8`
+               found reference `&usize`
+note: method defined here
+   --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\std\src\collections\hash\map.rs:897:12
+    |
+897 |     pub fn get<Q: ?Sized>(&self, k: &Q) -> Option<&V>
+    |            ^^^
+
+error[E0277]: the trait bound `str: std::error::Error` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:906:77
+    |
+906 |             let up = self.up_cpu.get(&quan_bit).cloned().ok_or("Missing up")?;
+    |                                                                             ^ the trait `std::error::Error` is not implemented for `str`
+    |
+    = help: the trait `FromResidual<Result<Infallible, E>>` is implemented for `Result<T, F>`
+    = note: required for `&str` to implement `std::error::Error`
+    = note: required for `anyhow::Error` to implement `From<&str>`
+    = note: required for `Result<(), anyhow::Error>` to implement `FromResidual<Result<Infallible, &str>>`
+
+error[E0308]: mismatched types
+   --> src\models\Qwen\modeling_qwen_moe.rs:907:42
+    |
+907 |             let down = self.down_cpu.get(&quan_bit).cloned().ok_or("Missing down")?;
+    |                                      --- ^^^^^^^^^ expected `&u8`, found `&usize`
+    |                                      |
+    |                                      arguments to this method are incorrect
+    |
+    = note: expected reference `&u8`
+               found reference `&usize`
+note: method defined here
+   --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\std\src\collections\hash\map.rs:897:12
+    |
+897 |     pub fn get<Q: ?Sized>(&self, k: &Q) -> Option<&V>
+    |            ^^^
+
+error[E0277]: the trait bound `str: std::error::Error` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:907:83
+    |
+907 |             let down = self.down_cpu.get(&quan_bit).cloned().ok_or("Missing down")?;
+    |                                                                                   ^ the trait `std::error::Error` is not implemented for `str`
+    |
+    = help: the trait `FromResidual<Result<Infallible, E>>` is implemented for `Result<T, F>`
+    = note: required for `&str` to implement `std::error::Error`
+    = note: required for `anyhow::Error` to implement `From<&str>`
+    = note: required for `Result<(), anyhow::Error>` to implement `FromResidual<Result<Infallible, &str>>`
+
+error[E0277]: the trait bound `&str: Into<anyhow::Error>` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:970:72
+    |
+970 |             _ => return Err("gate weight not loaded or invalid format".into()),
+    |                                                                        ^^^^ the trait `std::error::Error` is not implemented for `str`
+    |
+    = note: required for `&str` to implement `std::error::Error`
+    = note: required for `anyhow::Error` to implement `From<&str>`
+    = note: required for `&str` to implement `Into<anyhow::Error>`
+
+error[E0277]: the trait bound `&str: Into<anyhow::Error>` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:974:70
+    |
+974 |             _ => return Err("up weight not loaded or invalid format".into()),
+    |                                                                      ^^^^ the trait `std::error::Error` is not implemented for `str`
+    |
+    = note: required for `&str` to implement `std::error::Error`
+    = note: required for `anyhow::Error` to implement `From<&str>`
+    = note: required for `&str` to implement `Into<anyhow::Error>`
+
+error[E0277]: the trait bound `&str: Into<anyhow::Error>` is not satisfied
+   --> src\models\Qwen\modeling_qwen_moe.rs:978:72
+    |
+978 |             _ => return Err("down weight not loaded or invalid format".into()),
+    |                                                                        ^^^^ the trait `std::error::Error` is not implemented for `str`
+    |
+    = note: required for `&str` to implement `std::error::Error`
+    = note: required for `anyhow::Error` to implement `From<&str>`
+    = note: required for `&str` to implement `Into<anyhow::Error>`
+
+error[E0599]: no method named `linear` found for reference `&candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:981:24
+    |
+981 |         let x_gate = x.linear(gate, None)?.silu();
+    |                        ^^^^^^ method not found in `&Tensor`
+
+error[E0599]: no method named `linear` found for reference `&candle_core::Tensor` in the current scope
+   --> src\models\Qwen\modeling_qwen_moe.rs:982:22
+    |
+982 |         let x_up = x.linear(up, None)?;
+    |                      ^^^^^^ method not found in `&Tensor`
+
+error[E0599]: no function or associated item named `from_bytes` found for struct `candle_core::Tensor` in the current scope
+    --> src\models\Qwen\modeling_qwen_moe.rs:1006:26
+     |
+1006 |     let tensor = Tensor::from_bytes(st.data(), dtype, &shape, device)?;
+     |                          ^^^^^^^^^^ function or associated item not found in `Tensor`
+     |
+note: if you're trying to build a new `candle_core::Tensor` consider using one of the following associated functions:
+      npy::<impl candle_core::Tensor>::read_npy
+      safetensors::<impl candle_core::Tensor>::from_raw_buffer
+      candle_core::Tensor::ones
+      candle_core::Tensor::zeros
+      and 14 others
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\safetensors.rs:192:5
+     |
+192  | /     pub fn from_raw_buffer(
+193  | |         data: &[u8],
+194  | |         dtype: DType,
+195  | |         shape: &[usize],
+196  | |         device: &Device,
+197  | |     ) -> Result<Self> {
+     | |_____________________^
+     |
+    ::: C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\npy.rs:246:5
+     |
+246  |       pub fn read_npy<T: AsRef<Path>>(path: T) -> Result<Self> {
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:203:5
+     |
+203  |       pub fn ones<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+255  |       pub fn zeros<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is an associated function `from_iter` with a similar name
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:416:5
+     |
+416  | /     pub fn from_iter<D: crate::WithDType>(
+417  | |         iter: impl IntoIterator<Item = D>,
+418  | |         device: &Device,
+419  | |     ) -> Result<Self> {
+     | |_____________________^
+
+error[E0608]: cannot index into a value of type `Option<HashMap<usize, usize>>`
+    --> src\models\Qwen\modeling_qwen_moe.rs:1060:58
+     |
+1060 |         let num_in_mem = num_experts - config.offload_map[layer_idx];
+     |                                                          ^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src\models\Qwen\modeling_qwen_moe.rs:1064:80
+     |
+1064 |         let gate = linear_no_bias_from_device(config.hidden_size, num_experts, &device)?;
+     |                    --------------------------                                  ^^^^^^^ expected `&Device`, found `&Option<Device>`
+     |                    |
+     |                    arguments to this function are incorrect
+     |
+     = note: expected reference `&candle_core::Device`
+                found reference `&Option<candle_core::Device>`
+note: function defined here
+    --> src\models\Qwen\modeling_qwen_moe.rs:1010:8
+     |
+1010 | pub fn linear_no_bias_from_device(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1013 |     device: &Device,
+     |     ---------------
+
+error[E0308]: mismatched types
+    --> src\models\Qwen\modeling_qwen_moe.rs:1065:84
+     |
+1065 |         let shared_expert_gate = linear_no_bias_from_device(config.hidden_size, 1, &device)?;
+     |                                  --------------------------                        ^^^^^^^ expected `&Device`, found `&Option<Device>`
+     |                                  |
+     |                                  arguments to this function are incorrect
+     |
+     = note: expected reference `&candle_core::Device`
+                found reference `&Option<candle_core::Device>`
+note: function defined here
+    --> src\models\Qwen\modeling_qwen_moe.rs:1010:8
+     |
+1010 | pub fn linear_no_bias_from_device(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1013 |     device: &Device,
+     |     ---------------
+
+error[E0308]: mismatched types
+    --> src\models\Qwen\modeling_qwen_moe.rs:1079:13
+     |
+1079 |             device,
+     |             ^^^^^^ expected `Device`, found `Option<Device>`
+     |
+     = note: expected enum `candle_core::Device`
+                found enum `Option<candle_core::Device>`
+help: consider using `Option::expect` to unwrap the `Option<candle_core::Device>` value, panicking if the value is an `Option::None`
+     |
+1079 |             device: device.expect("REASON"),
+     |                   +++++++++++++++++++++++++
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+    --> src\models\Qwen\modeling_qwen_moe.rs:1094:21
+     |
+1094 |         self.gate = candle_nn::Linear::new(gate_weight, None)?;
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `candle_nn::Linear`
+     |
+     = help: the trait `Try` is not implemented for `candle_nn::Linear`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+    --> src\models\Qwen\modeling_qwen_moe.rs:1100:35
+     |
+1100 |         self.shared_expert_gate = candle_nn::Linear::new(shared_expert_gate_weight, None)?;
+     |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `candle_nn::Linear`
+     |
+     = help: the trait `Try` is not implemented for `candle_nn::Linear`
+
+error[E0277]: `dyn std::error::Error` cannot be sent between threads safely
+    --> src\models\Qwen\modeling_qwen_moe.rs:1104:83
+     |
+1104 |             self.experts[idx].init_weights(path, Some(idx), Some(self.num_in_mem))?;
+     |                                                                                   ^ `dyn std::error::Error` cannot be sent between threads safely
+     |
+     = help: the trait `std::marker::Send` is not implemented for `dyn std::error::Error`
+     = help: the trait `FromResidual<Result<Infallible, E>>` is implemented for `Result<T, F>`
+     = note: required for `Unique<dyn std::error::Error>` to implement `std::marker::Send`
+note: required because it appears within the type `Box<dyn std::error::Error>`
+    --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\boxed.rs:231:12
+     |
+231  | pub struct Box<
+     |            ^^^
+     = note: required for `anyhow::Error` to implement `From<Box<dyn std::error::Error>>`
+     = note: required for `Result<(), anyhow::Error>` to implement `FromResidual<Result<Infallible, Box<dyn std::error::Error>>>`
+
+error[E0277]: `dyn std::error::Error` cannot be shared between threads safely
+    --> src\models\Qwen\modeling_qwen_moe.rs:1104:83
+     |
+1104 |             self.experts[idx].init_weights(path, Some(idx), Some(self.num_in_mem))?;
+     |                                                                                   ^ `dyn std::error::Error` cannot be shared between threads safely
+     |
+     = help: the trait `std::marker::Sync` is not implemented for `dyn std::error::Error`
+     = help: the trait `FromResidual<Result<Infallible, E>>` is implemented for `Result<T, F>`
+     = note: required for `Unique<dyn std::error::Error>` to implement `std::marker::Sync`
+note: required because it appears within the type `Box<dyn std::error::Error>`
+    --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\boxed.rs:231:12
+     |
+231  | pub struct Box<
+     |            ^^^
+     = note: required for `anyhow::Error` to implement `From<Box<dyn std::error::Error>>`
+     = note: required for `Result<(), anyhow::Error>` to implement `FromResidual<Result<Infallible, Box<dyn std::error::Error>>>`
+
+error[E0277]: the size for values of type `dyn std::error::Error` cannot be known at compilation time
+    --> src\models\Qwen\modeling_qwen_moe.rs:1104:83
+     |
+1104 |             self.experts[idx].init_weights(path, Some(idx), Some(self.num_in_mem))?;
+     |                                                                                   ^ doesn't have a size known at compile-time
+     |
+     = help: the trait `Sized` is not implemented for `dyn std::error::Error`
+     = help: the trait `FromResidual<Result<Infallible, E>>` is implemented for `Result<T, F>`
+     = note: required for `Box<dyn std::error::Error>` to implement `std::error::Error`
+     = note: required for `anyhow::Error` to implement `From<Box<dyn std::error::Error>>`
+     = note: required for `Result<(), anyhow::Error>` to implement `FromResidual<Result<Infallible, Box<dyn std::error::Error>>>`
+
+error[E0277]: `dyn std::error::Error` cannot be sent between threads safely
+    --> src\models\Qwen\modeling_qwen_moe.rs:1108:58
+     |
+1108 |         self.shared_expert.init_weights(path, None, None)?;
+     |                                                          ^ `dyn std::error::Error` cannot be sent between threads safely
+     |
+     = help: the trait `std::marker::Send` is not implemented for `dyn std::error::Error`
+     = help: the trait `FromResidual<Result<Infallible, E>>` is implemented for `Result<T, F>`
+     = note: required for `Unique<dyn std::error::Error>` to implement `std::marker::Send`
+note: required because it appears within the type `Box<dyn std::error::Error>`
+    --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\boxed.rs:231:12
+     |
+231  | pub struct Box<
+     |            ^^^
+     = note: required for `anyhow::Error` to implement `From<Box<dyn std::error::Error>>`
+     = note: required for `Result<(), anyhow::Error>` to implement `FromResidual<Result<Infallible, Box<dyn std::error::Error>>>`
+
+error[E0277]: `dyn std::error::Error` cannot be shared between threads safely
+    --> src\models\Qwen\modeling_qwen_moe.rs:1108:58
+     |
+1108 |         self.shared_expert.init_weights(path, None, None)?;
+     |                                                          ^ `dyn std::error::Error` cannot be shared between threads safely
+     |
+     = help: the trait `std::marker::Sync` is not implemented for `dyn std::error::Error`
+     = help: the trait `FromResidual<Result<Infallible, E>>` is implemented for `Result<T, F>`
+     = note: required for `Unique<dyn std::error::Error>` to implement `std::marker::Sync`
+note: required because it appears within the type `Box<dyn std::error::Error>`
+    --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\boxed.rs:231:12
+     |
+231  | pub struct Box<
+     |            ^^^
+     = note: required for `anyhow::Error` to implement `From<Box<dyn std::error::Error>>`
+     = note: required for `Result<(), anyhow::Error>` to implement `FromResidual<Result<Infallible, Box<dyn std::error::Error>>>`
+
+error[E0277]: the size for values of type `dyn std::error::Error` cannot be known at compilation time
+    --> src\models\Qwen\modeling_qwen_moe.rs:1108:58
+     |
+1108 |         self.shared_expert.init_weights(path, None, None)?;
+     |                                                          ^ doesn't have a size known at compile-time
+     |
+     = help: the trait `Sized` is not implemented for `dyn std::error::Error`
+     = help: the trait `FromResidual<Result<Infallible, E>>` is implemented for `Result<T, F>`
+     = note: required for `Box<dyn std::error::Error>` to implement `std::error::Error`
+     = note: required for `anyhow::Error` to implement `From<Box<dyn std::error::Error>>`
+     = note: required for `Result<(), anyhow::Error>` to implement `FromResidual<Result<Infallible, Box<dyn std::error::Error>>>`
+
+error[E0599]: no method named `topk` found for struct `candle_core::Tensor` in the current scope
+    --> src\models\Qwen\modeling_qwen_moe.rs:1174:67
+     |
+1174 |         let (routing_weights, selected_experts) = routing_weights.topk(self.top_k, 1)?;
+     |                                                                   ^^^^ method not found in `Tensor`
+
+error[E0277]: the trait bound `Shape: From<({integer}, i64)>` is not satisfied
+    --> src\models\Qwen\modeling_qwen_moe.rs:1258:80
+     |
+1258 |             let current_state = hidden_states.index_select(&top_x,0 )?.reshape((-1, hidden_dim as i64))?;
+     |                                                                        ------- ^^^^^^^^^^^^^^^^^^^^^^^ the trait `From<({integer}, i64)>` is not implemented for `Shape`
+     |                                                                        |
+     |                                                                        required by a bound introduced by this call
+     |
+     = help: the following other types implement trait `From<T>`:
+               `Shape` implements `From<&Shape>`
+               `Shape` implements `From<&[usize; C]>`
+               `Shape` implements `From<&[usize]>`
+               `Shape` implements `From<()>`
+               `Shape` implements `From<(usize, usize)>`
+               `Shape` implements `From<(usize, usize, usize)>`
+               `Shape` implements `From<(usize, usize, usize, usize)>`
+               `Shape` implements `From<(usize, usize, usize, usize, usize)>`
+             and 4 others
+     = note: required for `({integer}, i64)` to implement `Into<Shape>`
+     = note: required for `({integer}, i64)` to implement `ShapeWithOneHole`
+note: required by a bound in `candle_core::Tensor::reshape`
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:2275:23
+     |
+2275 |     pub fn reshape<S: ShapeWithOneHole>(&self, s: S) -> Result<Tensor> {
+     |                       ^^^^^^^^^^^^^^^^ required by this bound in `Tensor::reshape`
+
+error[E0277]: the trait bound `Shape: From<({integer}, i64)>` is not satisfied
+    --> src\models\Qwen\modeling_qwen_moe.rs:1272:80
+     |
+1272 |             let current_state = hidden_states.index_select(&top_x,0 )?.reshape((-1, hidden_dim as i64))?;
+     |                                                                        ------- ^^^^^^^^^^^^^^^^^^^^^^^ the trait `From<({integer}, i64)>` is not implemented for `Shape`
+     |                                                                        |
+     |                                                                        required by a bound introduced by this call
+     |
+     = help: the following other types implement trait `From<T>`:
+               `Shape` implements `From<&Shape>`
+               `Shape` implements `From<&[usize; C]>`
+               `Shape` implements `From<&[usize]>`
+               `Shape` implements `From<()>`
+               `Shape` implements `From<(usize, usize)>`
+               `Shape` implements `From<(usize, usize, usize)>`
+               `Shape` implements `From<(usize, usize, usize, usize)>`
+               `Shape` implements `From<(usize, usize, usize, usize, usize)>`
+             and 4 others
+     = note: required for `({integer}, i64)` to implement `Into<Shape>`
+     = note: required for `({integer}, i64)` to implement `ShapeWithOneHole`
+note: required by a bound in `candle_core::Tensor::reshape`
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:2275:23
+     |
+2275 |     pub fn reshape<S: ShapeWithOneHole>(&self, s: S) -> Result<Tensor> {
+     |                       ^^^^^^^^^^^^^^^^ required by this bound in `Tensor::reshape`
+
+error[E0277]: the trait bound `Shape: From<&[i64; 2]>` is not satisfied
+    --> src\models\Qwen\modeling_qwen_moe.rs:1363:51
+     |
+1363 |         let hidden_states = hidden_states.reshape(&[-1, hidden_dim as i64])?;
+     |                                           ------- ^^^^^^^^^^^^^^^^^^^^^^^^ the trait `From<&[i64; 2]>` is not implemented for `Shape`
+     |                                           |
+     |                                           required by a bound introduced by this call
+     |
+     = help: the following other types implement trait `From<T>`:
+               `Shape` implements `From<&Shape>`
+               `Shape` implements `From<&[usize; C]>`
+               `Shape` implements `From<&[usize]>`
+               `Shape` implements `From<()>`
+               `Shape` implements `From<(usize, usize)>`
+               `Shape` implements `From<(usize, usize, usize)>`
+               `Shape` implements `From<(usize, usize, usize, usize)>`
+               `Shape` implements `From<(usize, usize, usize, usize, usize)>`
+             and 4 others
+     = note: required for `&[i64; 2]` to implement `Into<Shape>`
+     = note: required for `&[i64; 2]` to implement `ShapeWithOneHole`
+note: required by a bound in `candle_core::Tensor::reshape`
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:2275:23
+     |
+2275 |     pub fn reshape<S: ShapeWithOneHole>(&self, s: S) -> Result<Tensor> {
+     |                       ^^^^^^^^^^^^^^^^ required by this bound in `Tensor::reshape`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+    --> src\models\Qwen\modeling_qwen_moe.rs:1367:19
+     |
+1367 |         let dim = routing_weights.dims()?.len() - 1;
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `&[usize]`
+     |
+     = help: the trait `Try` is not implemented for `&[usize]`
+
+error[E0599]: no method named `topk` found for struct `candle_core::Tensor` in the current scope
+    --> src\models\Qwen\modeling_qwen_moe.rs:1368:53
+     |
+1368 |         let (_, selected_experts) = routing_weights.topk(5, dim)?;
+     |                                                     ^^^^ method not found in `Tensor`
+
+error[E0308]: mismatched types
+    --> src\models\Qwen\modeling_qwen_moe.rs:1390:13
+     |
+1388 |         let (attn_output, present_cache) = self.self_attn.forward(
+     |                                                           ------- arguments to this method are incorrect
+1389 |             &hidden_states,
+1390 |             position_ids,
+     |             ^^^^^^^^^^^^ expected `&Tensor`, found `Option<&Tensor>`
+     |
+     = note: expected reference `&candle_core::Tensor`
+                     found enum `Option<&candle_core::Tensor>`
+note: method defined here
+    --> src\models\Qwen\modeling_qwen_moe.rs:551:12
+     |
+551  |     pub fn forward(
+     |            ^^^^^^^
+...
+554  |         position_ids: &Tensor,
+     |         ---------------------
+help: consider using `Option::expect` to unwrap the `Option<&candle_core::Tensor>` value, panicking if the value is an `Option::None`
+     |
+1390 |             position_ids.expect("REASON"),
+     |                         +++++++++++++++++
+
+error[E0599]: no method named `try_add` found for struct `candle_core::Tensor` in the current scope
+    --> src\models\Qwen\modeling_qwen_moe.rs:1397:38
+     |
+1397 |         let hidden_states = residual.try_add(&attn_output)?;
+     |                                      ^^^^^^^ method not found in `Tensor`
+
+error[E0608]: cannot index into a value of type `Option<HashMap<usize, usize>>`
+    --> src\models\Qwen\modeling_qwen_moe.rs:1409:40
+     |
+1409 |                 self.config.offload_map[self.layer_idx + 1] != 0 {
+     |                                        ^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: a value of type `counter::Counter<i64>` cannot be built from an iterator over elements of type `i64`
+    --> src\models\Qwen\modeling_qwen_moe.rs:1419:84
+     |
+1419 |                 let expert_counts: Counter<i64> = selected_experts.iter().copied().collect();
+     |                                                                                    ^^^^^^^ value of type `counter::Counter<i64>` cannot be built from `std::iter::Iterator<Item=i64>`
+     |
+     = help: the trait `FromIterator<i64>` is not implemented for `counter::Counter<i64>`
+note: the method call chain might not have had the expected associated types
+    --> src\models\Qwen\modeling_qwen_moe.rs:1419:75
+     |
+1416 |                 let selected_experts = selected_experts.to_vec1::<i64>()?;
+     |                                        ---------------------------------- this expression has type `Vec<i64>`
+...
+1419 |                 let expert_counts: Counter<i64> = selected_experts.iter().copied().collect();
+     |                                                                    ------ ^^^^^^^^ `Iterator::Item` changed to `i64` here
+     |                                                                    |
+     |                                                                    `Iterator::Item` is `&i64` here
+note: required by a bound in `std::iter::Iterator::collect`
+    --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\iter\traits\iterator.rs:1967:19
+     |
+1967 |     fn collect<B: FromIterator<Self::Item>>(self) -> B
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Iterator::collect`
+
+error[E0308]: mismatched types
+    --> src\models\Qwen\modeling_qwen_moe.rs:1422:60
+     |
+1422 |                 let most_common_items: Vec<(i64, usize)> = expert_counts.most_common_ordered();
+     |                                        -----------------   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Vec<(i64, usize)>`, found `IntoIter<(i64, usize)>`
+     |                                        |
+     |                                        expected due to this
+     |
+     = note: expected struct `Vec<(i64, usize)>`
+                found struct `std::vec::IntoIter<(i64, usize)>`
+
+error[E0308]: mismatched types
+    --> src\models\Qwen\modeling_qwen_moe.rs:1447:35
+     |
+1447 |                     .load_weights(&prefetch_list, false, Some(&int2_expert_set))?;
+     |                      ------------ ^^^^^^^^^^^^^^ expected `ExpertIndex`, found `&Vec<usize>`
+     |                      |
+     |                      arguments to this method are incorrect
+     |
+     = note:   expected enum `ExpertIndex`
+             found reference `&Vec<usize>`
+note: method defined here
+    --> src\models\Qwen\modeling_qwen_moe.rs:1113:12
+     |
+1113 |     pub fn load_weights(
+     |            ^^^^^^^^^^^^
+1114 |         &mut self,
+1115 |         idx: ExpertIndex,
+     |         ----------------
+
+error[E0599]: no function or associated item named `full_with_dtype` found for struct `candle_core::Tensor` in the current scope
+    --> src\models\Qwen\modeling_qwen_moe.rs:1551:46
+     |
+1551 |                     let pad_tensor = Tensor::full_with_dtype(ids.dims(), pad_idx as i64, DType::I64, ids.device())?;  // padding idx 张量
+     |                                              ^^^^^^^^^^^^^^^ function or associated item not found in `Tensor`
+     |
+note: if you're trying to build a new `candle_core::Tensor` consider using one of the following associated functions:
+      npy::<impl candle_core::Tensor>::read_npy
+      safetensors::<impl candle_core::Tensor>::from_raw_buffer
+      candle_core::Tensor::ones
+      candle_core::Tensor::zeros
+      and 14 others
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\safetensors.rs:192:5
+     |
+192  | /     pub fn from_raw_buffer(
+193  | |         data: &[u8],
+194  | |         dtype: DType,
+195  | |         shape: &[usize],
+196  | |         device: &Device,
+197  | |     ) -> Result<Self> {
+     | |_____________________^
+     |
+    ::: C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\npy.rs:246:5
+     |
+246  |       pub fn read_npy<T: AsRef<Path>>(path: T) -> Result<Self> {
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:203:5
+     |
+203  |       pub fn ones<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+255  |       pub fn zeros<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is a method `to_dtype` with a similar name, but with different arguments
+    --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:2205:5
+     |
+2205 |     pub fn to_dtype(&self, dtype: DType) -> Result<Self> {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+    --> src\models\Qwen\modeling_qwen_moe.rs:1767:25
+     |
+1767 |         config.device = device.clone();
+     |         -------------   ^^^^^^^^^^^^^^ expected `Option<Device>`, found `String`
+     |         |
+     |         expected due to the type of this binding
+     |
+     = note: expected enum `Option<candle_core::Device>`
+              found struct `std::string::String`
+
+error[E0308]: mismatched types
+    --> src\models\Qwen\modeling_qwen_moe.rs:1777:89
+     |
+1777 |         let lm_head = linear_no_bias_from_device(config.hidden_size, config.vocab_size, &device)?;
+     |                       --------------------------                                        ^^^^^^^ expected `&Device`, found `&String`
+     |                       |
+     |                       arguments to this function are incorrect
+     |
+     = note: expected reference `&candle_core::Device`
+                found reference `&std::string::String`
+note: function defined here
+    --> src\models\Qwen\modeling_qwen_moe.rs:1010:8
+     |
+1010 | pub fn linear_no_bias_from_device(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1013 |     device: &Device,
+     |     ---------------
+
+error[E0308]: mismatched types
+    --> src\models\Qwen\modeling_qwen_moe.rs:1781:13
+     |
+1781 |             device,
+     |             ^^^^^^ expected `Device`, found `String`
+
+error[E0308]: mismatched types
+    --> src\models\Qwen\modeling_qwen_moe.rs:1785:19
+     |
+1785 |             path: args.path.clone(),
+     |                   ^^^^^^^^^^^^^^^^^ expected `PathBuf`, found `String`
+     |
+help: call `Into::into` on this expression to convert `std::string::String` into `PathBuf`
+     |
+1785 |             path: args.path.clone().into(),
+     |                                    +++++++
+
+error[E0277]: the size for values of type `dyn std::error::Error + std::marker::Send + std::marker::Sync` cannot be known at compilation time
+  --> src\main.rs:65:56
+   |
+65 |     let encoding = tokenizer.encode(input_prompt, true)?;
+   |                                                        ^ doesn't have a size known at compile-time
+   |
+   = help: the trait `Sized` is not implemented for `dyn std::error::Error + std::marker::Send + std::marker::Sync`
+   = help: the trait `FromResidual<Result<Infallible, E>>` is implemented for `Result<T, F>`
+   = note: required for `Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>` to implement `std::error::Error`
+   = note: required for `anyhow::Error` to implement `From<Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>`
+   = note: required for `Result<(), anyhow::Error>` to implement `FromResidual<Result<Infallible, Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>>`
+
+error[E0277]: the trait bound `&&[u32]: NdArray` is not satisfied
+   --> src\main.rs:66:33
+    |
+66  |     let input_ids = Tensor::new(&encoding.get_ids(), &device)?.unsqueeze(0)?; // shape: [1, T]
+    |                     ----------- ^^^^^^^^^^^^^^^^^^^ the trait `WithDType` is not implemented for `&&[u32]`
+    |                     |
+    |                     required by a bound introduced by this call
+    |
+    = note: required for `&&[u32]` to implement `NdArray`
+note: required by a bound in `candle_core::Tensor::new`
+   --> C:\Users\Lenovo\.cargo\git\checkouts\candle-5b4d092929d18d36\92106c8\candle-core\src\tensor.rs:380:19
+    |
+380 |     pub fn new<A: crate::device::NdArray>(array: A, device: &Device) -> Result<Self> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Tensor::new`
+help: consider dereferencing here
+    |
+66  |     let input_ids = Tensor::new(&*encoding.get_ids(), &device)?.unsqueeze(0)?; // shape: [1, T]
+    |                                  +
+
+error[E0599]: no variant or associated item named `Int64` found for enum `DType` in the current scope
+  --> src\main.rs:67:73
+   |
+67 |     let attention_mask = Tensor::ones(&[1, input_ids.dims()[1]], DType::Int64, &device)?;
+   |                                                                         ^^^^^ variant or associated item not found in `DType`
+
+error[E0308]: mismatched types
+   --> src\main.rs:70:45
+    |
+70  |     let _ = model.generate(&input_ids, Some(&attention_mask), None)?;
+    |                                        ---- ^^^^^^^^^^^^^^^ expected `Tensor`, found `&Tensor`
+    |                                        |
+    |                                        arguments to this enum variant are incorrect
+    |
+help: the type constructed contains `&candle_core::Tensor` due to the type of the argument passed
+   --> src\main.rs:70:40
+    |
+70  |     let _ = model.generate(&input_ids, Some(&attention_mask), None)?;
+    |                                        ^^^^^---------------^
+    |                                             |
+    |                                             this argument influences the type of `Some`
+note: tuple variant defined here
+   --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:580:5
+    |
+580 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
+    |     ^^^^
+help: consider removing the borrow
+    |
+70  -     let _ = model.generate(&input_ids, Some(&attention_mask), None)?;
+70  +     let _ = model.generate(&input_ids, Some(attention_mask), None)?;
+    |
+
+error[E0308]: mismatched types
+    --> src\main.rs:70:28
+     |
+70   |     let _ = model.generate(&input_ids, Some(&attention_mask), None)?;
+     |                   -------- ^^^^^^^^^^ expected `Tensor`, found `&Tensor`
+     |                   |
+     |                   arguments to this method are incorrect
+     |
+note: method defined here
+    --> src\models\Qwen\modeling_qwen_moe.rs:1867:12
+     |
+1867 |     pub fn generate(
+     |            ^^^^^^^^
+1868 |         &self,
+1869 |         mut input_ids: Tensor,
+     |         ---------------------
+help: consider removing the borrow
+     |
+70   -     let _ = model.generate(&input_ids, Some(&attention_mask), None)?;
+70   +     let _ = model.generate(input_ids, Some(&attention_mask), None)?;
+     |
+
+error[E0308]: mismatched types
+   --> src\main.rs:74:70
+    |
+74  |     let (output_ids, prefill_time) = model.generate(&input_ids, Some(&attention_mask), Some("decoding"))?;
+    |                                                                 ---- ^^^^^^^^^^^^^^^ expected `Tensor`, found `&Tensor`
+    |                                                                 |
+    |                                                                 arguments to this enum variant are incorrect
+    |
+help: the type constructed contains `&candle_core::Tensor` due to the type of the argument passed
+   --> src\main.rs:74:65
+    |
+74  |     let (output_ids, prefill_time) = model.generate(&input_ids, Some(&attention_mask), Some("decoding"))?;
+    |                                                                 ^^^^^---------------^
+    |                                                                      |
+    |                                                                      this argument influences the type of `Some`
+note: tuple variant defined here
+   --> C:\Users\Lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs:580:5
+    |
+580 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
+    |     ^^^^
+help: consider removing the borrow
+    |
+74  -     let (output_ids, prefill_time) = model.generate(&input_ids, Some(&attention_mask), Some("decoding"))?;
+74  +     let (output_ids, prefill_time) = model.generate(&input_ids, Some(attention_mask), Some("decoding"))?;
+    |
+
+error[E0308]: mismatched types
+    --> src\main.rs:74:53
+     |
+74   |     let (output_ids, prefill_time) = model.generate(&input_ids, Some(&attention_mask), Some("decoding"))?;
+     |                                            -------- ^^^^^^^^^^ expected `Tensor`, found `&Tensor`
+     |                                            |
+     |                                            arguments to this method are incorrect
+     |
+note: method defined here
+    --> src\models\Qwen\modeling_qwen_moe.rs:1867:12
+     |
+1867 |     pub fn generate(
+     |            ^^^^^^^^
+1868 |         &self,
+1869 |         mut input_ids: Tensor,
+     |         ---------------------
+help: consider removing the borrow
+     |
+74   -     let (output_ids, prefill_time) = model.generate(&input_ids, Some(&attention_mask), Some("decoding"))?;
+74   +     let (output_ids, prefill_time) = model.generate(input_ids, Some(&attention_mask), Some("decoding"))?;
+     |
+
+error[E0308]: mismatched types
+   --> src\main.rs:80:35
+    |
+80  |     let output = tokenizer.decode(output_tokens, true)?;
+    |                            ------ ^^^^^^^^^^^^^ expected `&[u32]`, found `i64`
+    |                            |
+    |                            arguments to this method are incorrect
+    |
+note: method defined here
+   --> C:\Users\Lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokenizers-0.21.1\src\tokenizer\mod.rs:889:12
+    |
+889 |     pub fn decode(&self, ids: &[u32], skip_special_tokens: bool) -> Result<String> {
+    |            ^^^^^^
+
+error[E0277]: the size for values of type `dyn std::error::Error + std::marker::Send + std::marker::Sync` cannot be known at compilation time
+  --> src\main.rs:80:55
+   |
+80 |     let output = tokenizer.decode(output_tokens, true)?;
+   |                                                       ^ doesn't have a size known at compile-time
+   |
+   = help: the trait `Sized` is not implemented for `dyn std::error::Error + std::marker::Send + std::marker::Sync`
+   = help: the trait `FromResidual<Result<Infallible, E>>` is implemented for `Result<T, F>`
+   = note: required for `Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>` to implement `std::error::Error`
+   = note: required for `anyhow::Error` to implement `From<Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>`
+   = note: required for `Result<(), anyhow::Error>` to implement `FromResidual<Result<Infallible, Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>>>`
+
+warning: unused variable: `layer_idx`
+   --> src\models\Qwen\modeling_qwen_moe.rs:430:9
+    |
+430 |         layer_idx: usize,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_layer_idx`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+Some errors have detailed explanations: E0277, E0308, E0599, E0608.
+For more information about an error, try `rustc --explain E0277`.
+warning: `Fcllm` (lib) generated 7 warnings
+error: could not compile `Fcllm` (lib) due to 152 previous errors; 7 warnings emitted
+warning: build failed, waiting for other jobs to finish...
