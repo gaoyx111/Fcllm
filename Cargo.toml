@@ -1,0 +1,19 @@
+[package]
+name = "Fcllm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.98"
+candle-core = { git = "https://github.com/huggingface/candle.git", version = "0.9.1", features = ["cuda"] }
+candle-nn = { git = "https://github.com/huggingface/candle.git", version = "0.9.1", features = ["cuda"] }
+hf-hub = "0.4.2"
+serde = "1.0.219"
+serde_json = "1.0.140"
+tokenizers = "0.21.1"
+nvml-wrapper = "0.11.0"
+tqdm = "0.7.0"
+clap = { version = "4.5.39", features = ["derive"] }
+
+[features]
+my_own_version = []
