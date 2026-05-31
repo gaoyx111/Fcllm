@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 
 /// 参数结构体
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 #[command(name = "Qwen2MoeForCausalLM")]
 #[command(about = "Run Qwen2MoeForCausalLM inference", long_about = None)]
 pub struct Args {
@@ -42,6 +42,29 @@ pub struct Args {
     /// 是否使用 overlap 推理
     #[arg(long, default_value_t = true)]
     pub overlap: bool,
+
+    // ─── 服务器模式专用参数 ───
+
+    /// 以 HTTP 服务器模式启动（接入前端页面）
+    #[arg(long, default_value_t = false)]
+    pub server: bool,
+
+    /// HTTP 服务监听端口（仅 server 模式有效）
+    /// 注意：Steam 会占用 8080，默认改用 18080
+    #[arg(long, default_value_t = 18080)]
+    pub port: u16,
+
+    /// 前端静态文件目录（把 chatgpt-web 构建产物 dist/ 放到这里）
+    #[arg(long)]
+    pub frontend_dir: Option<String>,
+
+    /// Tokenizer 文件路径（不填则自动推断）
+    #[arg(long)]
+    pub tokenizer_path: Option<PathBuf>,
+
+    /// 仅运行 HTTP 服务，不弹出桌面窗口（浏览器访问模式）
+    #[arg(long, default_value_t = false)]
+    pub no_ui: bool,
 }
 
 // /// 默认路径函数

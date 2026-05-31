@@ -34,6 +34,8 @@ pub struct Qwen2MoeConfig {
     pub eos_token_id: usize,
     pub bos_token_id: usize,
     pub pad_token_id: usize,
+    /// 生成时遇到这些 token 就停止（包含 <|im_end|> 等对话结束标记）
+    pub stop_token_ids: Vec<u32>,
 
     // 扩展字段
     pub offload: bool,
@@ -76,6 +78,11 @@ impl Qwen2MoeConfig {
             eos_token_id: 151_643,
             bos_token_id: 151_643,
             pad_token_id: 151_643,
+            // Qwen1.5 对话模式停止符：
+            //   151643 = <|endoftext|>（文档结束）
+            //   151644 = <|im_start|>（新一轮对话开始，此时应当立即停止）
+            //   151645 = <|im_end|>   （助手这轮回答结束，最关键！）
+            stop_token_ids: vec![151_643, 151_644, 151_645],
             offload: true,
             device: /* Device::cuda_if_available(0).unwrap_or(Device::Cpu) */ Device::Cpu,
             _attn_implementation: "sdpa".to_string(),

@@ -140,6 +140,92 @@ impl Qwen2MoeForCausalLM {
     }
 
 
+    /// 流式生成：每产出一个 token 就调用 callback
+    ///
+    /// callback 参数是 token id (u32)，返回 true 继续生成，返回 false 立即停止
+    /// （客户端断开连接时 channel send 失败，callback 返回 false，自动停止推理）
+    pub fn generate_streaming<F>(
+        &mut self,
+        input_ids: &Tensor,
+        attention_mask: Option<Tensor>,
+        mut callback: F,
+    ) -> Result<()>
+    where
+        F: FnMut(u32) -> bool,
+    {
+        let mut past_key_values = Some(Cache::new(true, input_ids.dtype(), &self.config)?);
+        let seq_len = input_ids.dim(1)?;
+        let device = self.device.clone();
+
+        let mut attention_mask = match attention_mask {
+            Some(mask) => mask,
+            None => Tensor::ones((1, seq_len), DType::U32, &device)?.to_dtype(DType::I64)?,
+        };
+
+        let mut position_ids =
+            Tensor::arange(0u32, seq_len as u32, &device)?.reshape((1, seq_len))?;
+        let mut cache_position =
+            Tensor::arange(0u32, seq_len as u32, &device)?.reshape((seq_len,))?;
+
+        let mut input_ids = input_ids.clone();
+
+        for _i in 0..self.max_length {
+            let (logits, new_cache) = self.forward(
+                Some(&input_ids),
+                Some(&attention_mask),
+                Some(&position_ids),
+                past_key_values,
+                None,
+                Some(&cache_position),
+                0,
+            )?;
+
+            past_key_values = new_cache;
+
+            let dim = logits.dims().len() - 1;
+            let logits = candle_nn::ops::softmax(&logits, dim)?;
+            let next_token = logits.argmax(dim)?;
+
+            // prefill 阶段取最后一个位置的预测；decoding 阶段只有 1 个位置
+            let last_token = next_token.narrow(1, next_token.dim(1)? - 1, 1)?;
+            let tok_id = last_token.i((0, 0))?.to_scalar::<u32>()?;
+
+            // 遇到任意停止 token 就结束（含 <|im_end|>=151645、<|im_start|>=151644、<|endoftext|>=151643）
+            if self.config.stop_token_ids.contains(&tok_id) {
+                eprintln!("[gen] stop_token_ids 命中: tok_id={} 第 {} 个 token", tok_id, _i);
+                break;
+            }
+            // 调试：打印前 5 个 token id，方便核实模型输出
+            if _i < 5 {
+                eprintln!("[gen debug] iter={} tok_id={}", _i, tok_id);
+            }
+
+            // 调用回调；若返回 false（通道关闭）则停止生成
+            if !callback(tok_id) {
+                break;
+            }
+
+            // 准备下一轮输入
+            input_ids = last_token.to_dtype(DType::I64)?;
+
+            position_ids = position_ids
+                .narrow(1, position_ids.dim(1)? - 1, 1)?
+                .to_dtype(DType::I64)?
+                .add(&Tensor::new(1_i64, &position_ids.device())?.reshape((1, 1))?)?;
+
+            let last_cache_pos = cache_position
+                .narrow(0, cache_position.dim(0)? - 1, 1)?
+                .to_dtype(DType::I64)?;
+            cache_position = last_cache_pos
+                .add(&Tensor::new(1_i64, &cache_position.device())?.reshape((1,))?)?;
+
+            let ones = Tensor::ones((1, 1), DType::I64, &attention_mask.device())?;
+            attention_mask = Tensor::cat(&[&attention_mask, &ones], 1)?;
+        }
+
+        Ok(())
+    }
+
     pub fn generate(
         &mut self,
         input_ids: &Tensor,
@@ -222,7 +308,8 @@ impl Qwen2MoeForCausalLM {
             if i < 5 || i % 50 == 0 {
                 eprintln!("[token {}] id={}", i, tok_id);
             }
-            if tok_id == self.config.eos_token_id as i64 {
+            // 同样检查所有停止 token（<|im_end|> / <|im_start|> / <|endoftext|>）
+            if self.config.stop_token_ids.contains(&(tok_id as u32)) {
                 return Ok((output.unwrap(), prefill_time));
             }
 
