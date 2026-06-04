@@ -1,12 +1,11 @@
-use candle_core::{DType, Device, Result, Tensor}; 
+use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::{Module, VarBuilder};
 // use candle_core::safetensors::{Load, load, load_buffer};
 use crate::load::ExpertTensorLoader;
 
-
 //#[cfg(feature = "my_own_version")]
 #[derive(Debug, Clone)]
-pub struct Qwen2MoeRMSNorm{
+pub struct Qwen2MoeRMSNorm {
     pub weight: Tensor,
     pub variance_epsilon: f64,
     pub device: Device,
@@ -50,13 +49,20 @@ impl Qwen2MoeRMSNorm {
         let variance = hidden_states_f32
             .sqr()? // pow(2)
             .mean_keepdim([hidden_states_f32.rank() - 1])?; // mean(-1, keepdim=True)
-        let eps_tensor = Tensor::full(self.variance_epsilon, variance.dims(), &self.device)?.to_dtype(DType::F32)?;
+        let eps_tensor = Tensor::full(self.variance_epsilon, variance.dims(), &self.device)?
+            .to_dtype(DType::F32)?;
         // variance + eps => sqrt => rsqrt
         let denom = (variance + eps_tensor)?.sqrt()?.recip()?;
         // 归一化
-        let denom_expanded = denom.broadcast_as(hidden_states_f32.shape())?.contiguous()?;
+        let denom_expanded = denom
+            .broadcast_as(hidden_states_f32.shape())?
+            .contiguous()?;
         let normalized = (hidden_states_f32 * denom_expanded)?;
-        let weight_expanded = self.weight.to_dtype(DType::F32)?.broadcast_as(normalized.shape())?.contiguous()?;
+        let weight_expanded = self
+            .weight
+            .to_dtype(DType::F32)?
+            .broadcast_as(normalized.shape())?
+            .contiguous()?;
         let output = (&normalized * &weight_expanded)?;
         output.to_dtype(input_dtype)
     }
@@ -70,8 +76,6 @@ impl Qwen2MoeRMSNorm {
     }
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct RmsNorm {
     inner: candle_nn::RmsNorm,
@@ -80,7 +84,7 @@ pub struct RmsNorm {
 impl RmsNorm {
     pub fn new(hidden_size: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
         let inner = candle_nn::rms_norm(hidden_size, eps, vb)?;
-        Ok(Self {inner})
+        Ok(Self { inner })
     }
 
     pub fn forward_diff(&self, x: &Tensor) -> Result<Tensor> {

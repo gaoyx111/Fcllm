@@ -1,7 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
 
-
 /// 参数结构体
 #[derive(Debug, Clone, Parser)]
 #[command(name = "Qwen2MoeForCausalLM")]
@@ -44,8 +43,11 @@ pub struct Args {
     pub overlap: bool,
 
     // ─── 服务器模式专用参数 ───
+    /// 仅运行一次命令行推理，不启动 HTTP 服务/桌面窗口
+    #[arg(long, default_value_t = false, conflicts_with_all = ["server", "no_ui"])]
+    pub cli: bool,
 
-    /// 以 HTTP 服务器模式启动（接入前端页面）
+    /// 以 HTTP 服务器模式启动（兼容旧参数；现在无参数默认也会启动桌面窗口）
     #[arg(long, default_value_t = false)]
     pub server: bool,
 

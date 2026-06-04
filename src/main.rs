@@ -1,56 +1,67 @@
-mod configuration_qwen;
-mod load;
+mod Attention;
+mod Cache;
+mod DecoderLayer;
+mod ForCausalLM;
+mod MLP;
+mod Model;
 mod RmsNorm;
 mod RotaryEmbedding;
-mod Attention;
-mod linear;
-mod Cache;
-mod MLP;
-mod quantizer;
-mod utils;
-mod expert_ARC_cahce;
 mod SparseMoeBlock;
-mod DecoderLayer;
-mod Model;
-mod nn_embedding;
-mod ForCausalLM;
 mod args;
+mod configuration_qwen;
+mod expert_ARC_cahce;
+mod linear;
+mod load;
+mod nn_embedding;
+mod quantizer;
 mod server;
-
+mod utils;
 
 use candle_core::{Result, Tensor};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokenizers::{Tokenizer, Encoding};
 use std::time::Instant;
+use tokenizers::{Encoding, Tokenizer};
 
+use ForCausalLM::Qwen2MoeForCausalLM;
 use args::Args;
 use clap::Parser;
-use ForCausalLM::Qwen2MoeForCausalLM;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartMode {
+    Cli,
+    Desktop,
+    HeadlessServer,
+}
 
+fn start_mode(args: &Args) -> StartMode {
+    if args.cli {
+        StartMode::Cli
+    } else if args.no_ui {
+        StartMode::HeadlessServer
+    } else {
+        StartMode::Desktop
+    }
+}
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    match (args.server, args.no_ui) {
-        // 命令行推理模式（原有功能）
-        (false, _) => run_cli(args),
-        // 服务器 + 桌面窗口模式（默认 server 行为）
-        (true, false) => {
+    match start_mode(&args) {
+        // 命令行推理模式（原有功能），现在需显式使用 --cli
+        StartMode::Cli => run_cli(args),
+        // 服务器 + 桌面窗口模式（默认行为）
+        StartMode::Desktop => {
             println!("正在加载模型，请稍候...");
             let mut model = Qwen2MoeForCausalLM::new(args.clone())?;
             model.init_weights()?;
-            let tokenizer = Arc::new(
-                Tokenizer::from_file(resolve_tokenizer_path(&args))
-                    .map_err(|e| candle_core::Error::Msg(format!("tokenizer 加载失败: {e}")))?,
-            );
+            let tokenizer = Arc::new(load_tokenizer(&args)?);
             println!("模型加载完成！正在启动桌面窗口...");
             // launch_desktop_app 返回 !（永不返回），会强制关闭进程
             launch_desktop_app(args, model, tokenizer)
         }
         // 服务器 + 无界面模式（--no-ui）
-        (true, true) => run_server_headless(args),
+        StartMode::HeadlessServer => run_server_headless(args),
     }
 }
 
@@ -63,9 +74,7 @@ fn run_cli(args: Args) -> Result<()> {
     let device = model.device.clone();
     model.init_weights()?;
 
-    let tokenizer_path = resolve_tokenizer_path(&args);
-    let tokenizer = Tokenizer::from_file(&tokenizer_path)
-        .map_err(|e| candle_core::Error::Msg(format!("failed to load tokenizer: {e}")))?;
+    let tokenizer = load_tokenizer(&args)?;
 
     // 编码输入
     let prompt = "Hey, are you conscious? Can you talk to me?";
@@ -78,13 +87,15 @@ fn run_cli(args: Args) -> Result<()> {
         .collect();
 
     let input_ids_tensor = Tensor::new(input_ids.as_slice(), &device)?.unsqueeze(0)?;
-    let attention_mask_tensor =
-        Tensor::new(attention_mask.as_slice(), &device)?.unsqueeze(0)?;
+    let attention_mask_tensor = Tensor::new(attention_mask.as_slice(), &device)?.unsqueeze(0)?;
 
     // 生成
     let start = Instant::now();
-    let (output_ids_tensor, _prefill_time) =
-        model.generate(&input_ids_tensor, Some(attention_mask_tensor), Some("decoding"))?;
+    let (output_ids_tensor, _prefill_time) = model.generate(
+        &input_ids_tensor,
+        Some(attention_mask_tensor),
+        Some("decoding"),
+    )?;
     println!("latency = {:.2?}", start.elapsed());
 
     let output_flat = output_ids_tensor.squeeze(0)?;
@@ -104,11 +115,7 @@ fn run_cli(args: Args) -> Result<()> {
 
 /// 启动桌面 App（原生 WebView 窗口）
 /// 此函数永不返回（tao event loop 发散）
-fn launch_desktop_app(
-    args: Args,
-    model: Qwen2MoeForCausalLM,
-    tokenizer: Arc<Tokenizer>,
-) -> ! {
+fn launch_desktop_app(args: Args, model: Qwen2MoeForCausalLM, tokenizer: Arc<Tokenizer>) -> ! {
     use tao::{
         dpi::LogicalSize,
         event::{Event, WindowEvent},
@@ -131,14 +138,14 @@ fn launch_desktop_app(
     });
 
     // 4. HTTP 服务器线程
-    let frontend_dir = args.frontend_dir.clone();
+    let frontend_dir = resolve_frontend_dir(args.frontend_dir.clone());
     std::thread::spawn(move || {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("无法创建 tokio 运行时")
             .block_on(async move {
-                let state = server::AppState { req_tx };
+                let state = server::AppState::new(req_tx);
                 let app = server::create_router(state, frontend_dir);
                 let addr = format!("0.0.0.0:{port}");
                 let listener = tokio::net::TcpListener::bind(&addr)
@@ -197,15 +204,12 @@ fn run_server_headless(args: Args) -> Result<()> {
     model.init_weights()?;
     println!("模型加载完成！");
 
-    let tokenizer = Arc::new(
-        Tokenizer::from_file(resolve_tokenizer_path(&args))
-            .map_err(|e| candle_core::Error::Msg(format!("tokenizer 加载失败: {e}")))?,
-    );
+    let tokenizer = Arc::new(load_tokenizer(&args)?);
 
     let (req_tx, req_rx) = tokio::sync::mpsc::channel::<server::InferRequest>(4);
 
     let port = args.port;
-    let frontend_dir = args.frontend_dir.clone();
+    let frontend_dir = resolve_frontend_dir(args.frontend_dir.clone());
     let req_tx_clone = req_tx.clone();
 
     std::thread::spawn(move || {
@@ -214,7 +218,7 @@ fn run_server_headless(args: Args) -> Result<()> {
             .build()
             .expect("无法创建 tokio 运行时")
             .block_on(async move {
-                let state = server::AppState { req_tx: req_tx_clone };
+                let state = server::AppState::new(req_tx_clone);
                 let app = server::create_router(state, frontend_dir);
                 let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
                     .await
@@ -226,7 +230,9 @@ fn run_server_headless(args: Args) -> Result<()> {
                 if let Err(e) = open::that(&local_url) {
                     eprintln!("无法自动打开浏览器: {e}");
                 }
-                axum::serve(listener, app).await.expect("HTTP 服务器异常退出");
+                axum::serve(listener, app)
+                    .await
+                    .expect("HTTP 服务器异常退出");
             });
     });
 
@@ -238,6 +244,51 @@ fn run_server_headless(args: Args) -> Result<()> {
 // ─────────────────────────────────────────────────────────────
 //  辅助函数
 // ─────────────────────────────────────────────────────────────
+
+fn resolve_frontend_dir(frontend_dir: Option<String>) -> Option<String> {
+    if let Some(dir) = frontend_dir.filter(|dir| !dir.trim().is_empty()) {
+        return Some(dir);
+    }
+
+    for candidate in frontend_dir_candidates() {
+        if candidate.join("index.html").exists() {
+            let dir = candidate.to_string_lossy().to_string();
+            println!("使用前端目录：{dir}");
+            return Some(dir);
+        }
+    }
+
+    eprintln!(
+        "未找到前端 dist 目录；将只启动 API 服务。可用 --frontend-dir 指定 chatgpt-web\\dist。"
+    );
+    None
+}
+
+fn frontend_dir_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("dist"));
+            candidates.push(exe_dir.join("frontend").join("dist"));
+        }
+    }
+
+    let project_root = args::find_project_root();
+    candidates.push(project_root.join("dist"));
+    candidates.push(project_root.join("frontend").join("dist"));
+    candidates.push(project_root.join("chatgpt-web").join("dist"));
+
+    if let Some(parent) = project_root.parent() {
+        candidates.push(parent.join("chatgpt-web").join("dist"));
+        if let Some(grandparent) = parent.parent() {
+            candidates.push(grandparent.join("chatgpt-web").join("dist"));
+        }
+    }
+
+    candidates.push(PathBuf::from(r"E:\chatgpt-web\dist"));
+    candidates
+}
 
 /// 推断 tokenizer.json 的路径
 /// 优先使用 --tokenizer-path 参数，否则按默认目录结构查找
@@ -272,4 +323,67 @@ fn resolve_tokenizer_path(args: &Args) -> PathBuf {
     }
 
     base
+}
+
+fn load_tokenizer(args: &Args) -> Result<Tokenizer> {
+    let tokenizer_path = resolve_tokenizer_path(args);
+    let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
+        .map_err(|e| candle_core::Error::Msg(format!("tokenizer 加载失败: {e}")))?;
+
+    // Qwen 的 chat template 依赖 <|im_start|>/<|im_end|> 被编码为
+    // 151644/151645。tokenizers 里这个开关语义很反直觉：
+    // false 才会把 special token 字面量抽取为 special token id；
+    // true 会把它们继续当普通文本编码。
+    tokenizer.set_encode_special_tokens(false);
+    let marker_encoding = tokenizer
+        .encode("<|im_start|><|im_end|>", true)
+        .map_err(|e| candle_core::Error::Msg(format!("tokenizer special token 校验失败: {e}")))?;
+    let marker_ids = marker_encoding.get_ids();
+    if !marker_ids.contains(&151_644) || !marker_ids.contains(&151_645) {
+        return Err(candle_core::Error::Msg(format!(
+            "tokenizer special token 校验失败: <|im_start|>/<|im_end|> 编码为 {:?}，不是 151644/151645",
+            marker_ids
+        )));
+    }
+    Ok(tokenizer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn tokenizer_encodes_qwen_chat_markers_as_special_tokens() {
+        let args = Args::parse_from(["Fcllm"]);
+        let tokenizer = load_tokenizer(&args).expect("tokenizer should load from model_weights");
+        let encoding = tokenizer
+            .encode("<|im_start|>assistant\n好的<|im_end|>", true)
+            .expect("prompt should encode");
+        let ids = encoding.get_ids();
+
+        assert!(ids.contains(&151_644), "<|im_start|> must be token 151644");
+        assert!(ids.contains(&151_645), "<|im_end|> must be token 151645");
+    }
+
+    #[test]
+    fn default_start_mode_is_desktop_window() {
+        let args = Args::parse_from(["Fcllm"]);
+
+        assert_eq!(start_mode(&args), StartMode::Desktop);
+    }
+
+    #[test]
+    fn no_ui_start_mode_is_headless_server() {
+        let args = Args::parse_from(["Fcllm", "--no-ui"]);
+
+        assert_eq!(start_mode(&args), StartMode::HeadlessServer);
+    }
+
+    #[test]
+    fn cli_flag_keeps_single_inference_mode() {
+        let args = Args::parse_from(["Fcllm", "--cli"]);
+
+        assert_eq!(start_mode(&args), StartMode::Cli);
+    }
 }

@@ -1,6 +1,5 @@
-use candle_core::{DType, Device, Result, Tensor}; 
+use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::Linear;
-
 
 // #[derive(Debug, Clone)]
 // pub struct Linear {
@@ -35,7 +34,6 @@ use candle_nn::Linear;
 //     }
 // }
 
-
 // #[cfg(feature = "my_own_version")]
 pub fn new_uninitialized_linear(
     in_features: usize,
@@ -51,4 +49,3 @@ pub fn new_uninitialized_linear(
     };
     Ok(Linear::new(w, b))
 }
-

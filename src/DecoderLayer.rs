@@ -1,16 +1,15 @@
-use std::collections::HashMap;
-use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::{Module, Linear};
-use crate::configuration_qwen::Qwen2MoeConfig;
-use crate::load::load_linear_from_files;
-use std::path::PathBuf;
-use crate::linear::new_uninitialized_linear;
-use std::collections::HashSet;
-use crate::RmsNorm::Qwen2MoeRMSNorm;
 use crate::Attention::Qwen2MoeAttention;
-use crate::SparseMoeBlock::{Qwen2MoeSparseMoeBlock, topk_routing, Idx};
 use crate::Cache::Cache;
-
+use crate::RmsNorm::Qwen2MoeRMSNorm;
+use crate::SparseMoeBlock::{Idx, Qwen2MoeSparseMoeBlock, topk_routing};
+use crate::configuration_qwen::Qwen2MoeConfig;
+use crate::linear::new_uninitialized_linear;
+use crate::load::load_linear_from_files;
+use candle_core::{DType, Device, Result, Tensor};
+use candle_nn::{Linear, Module};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::path::PathBuf;
 
 #[derive(Debug)]
 pub struct Qwen2MoeDecoderLayer {
@@ -25,19 +24,19 @@ pub struct Qwen2MoeDecoderLayer {
 }
 
 impl Qwen2MoeDecoderLayer {
-    pub fn new(
-        cfg: &Qwen2MoeConfig,
-        layer_idx: usize,
-    ) -> Result<Self> {
+    pub fn new(cfg: &Qwen2MoeConfig, layer_idx: usize) -> Result<Self> {
         let self_attn = Qwen2MoeAttention::new(cfg, Some(layer_idx))?;
 
         let mlp = Qwen2MoeSparseMoeBlock::new(cfg, layer_idx)?;
 
-        let input_layernorm = Qwen2MoeRMSNorm::new(cfg.hidden_size, cfg.device.clone(), cfg.rms_norm_eps);
-        let post_attention_layernorm = Qwen2MoeRMSNorm::new(cfg.hidden_size, cfg.device.clone(), cfg.rms_norm_eps);
+        let input_layernorm =
+            Qwen2MoeRMSNorm::new(cfg.hidden_size, cfg.device.clone(), cfg.rms_norm_eps);
+        let post_attention_layernorm =
+            Qwen2MoeRMSNorm::new(cfg.hidden_size, cfg.device.clone(), cfg.rms_norm_eps);
 
         // next_gate_cpu: Linear(hidden_size, num_experts), no bias, on CPU
-        let next_gate_cpu = new_uninitialized_linear(cfg.hidden_size, cfg.num_experts, false, &Device::Cpu)?;
+        let next_gate_cpu =
+            new_uninitialized_linear(cfg.hidden_size, cfg.num_experts, false, &Device::Cpu)?;
 
         Ok(Self {
             config: cfg.clone(),
@@ -63,7 +62,8 @@ impl Qwen2MoeDecoderLayer {
             "model.layers.{}.input_layernorm.weight",
             self.layer_idx
         ));
-        self.input_layernorm.init_weights(input_ln_path.to_str().unwrap())?;
+        self.input_layernorm
+            .init_weights(input_ln_path.to_str().unwrap())?;
 
         // post_attention_layernorm 权重路径
         let post_ln_path = original_dir.join(format!(
@@ -79,7 +79,11 @@ impl Qwen2MoeDecoderLayer {
                 "model.layers.{}.mlp.gate.weight",
                 self.layer_idx + 1
             ));
-            self.next_gate_cpu = load_linear_from_files(next_gate_path.to_str().unwrap(), None, &self.config.device)?;
+            self.next_gate_cpu = load_linear_from_files(
+                next_gate_path.to_str().unwrap(),
+                None,
+                &self.config.device,
+            )?;
         }
 
         Ok(())
@@ -107,7 +111,7 @@ impl Qwen2MoeDecoderLayer {
         let residual = hidden_states.clone();
         let hidden_states = self.input_layernorm.forward(&hidden_states)?;
 
-        let (hidden_states, present_key_value) = self.self_attn.forward(
+        let (hidden_states, _present_key_value) = self.self_attn.forward(
             &hidden_states,
             attention_mask,
             position_ids,
@@ -128,10 +132,16 @@ impl Qwen2MoeDecoderLayer {
 
             // Step 2: 预测 top-5 expert（每个 token）
             let selected_experts = self.predict(&hidden_cpu)?; // shape: [batch*seq, 5]
-            let selected_flat = selected_experts.flatten(0, selected_experts.rank() - 1)?.to_dtype(DType::I64)?; // flatten 到 1D
+            let selected_flat = selected_experts
+                .flatten(0, selected_experts.rank() - 1)?
+                .to_dtype(DType::I64)?; // flatten 到 1D
 
             // Step 3: 统计频次
-            let ids: Vec<usize> = selected_flat.to_vec1::<i64>()?.into_iter().map(|v| v as usize).collect();
+            let ids: Vec<usize> = selected_flat
+                .to_vec1::<i64>()?
+                .into_iter()
+                .map(|v| v as usize)
+                .collect();
             let mut counter = HashMap::<usize, usize>::new();
             for id in &ids {
                 *counter.entry(*id).or_insert(0) += 1;
@@ -159,7 +169,11 @@ impl Qwen2MoeDecoderLayer {
             // Step 6: 触发 next_layer 的专家权重加载（假设 next_layer 一定存在）
             if let Some(next) = next_layer {
                 let int2_experts_set: HashSet<usize> = int2_experts.iter().copied().collect();
-                next.mlp.load_weights(Idx::Multiple(top_experts.clone()), false, Some(&int2_experts_set))?;
+                next.mlp.load_weights(
+                    Idx::Multiple(top_experts.clone()),
+                    false,
+                    Some(&int2_experts_set),
+                )?;
             }
 
             // Step 7: 返回值构造
@@ -168,10 +182,12 @@ impl Qwen2MoeDecoderLayer {
         }
 
         // 当前层 MoE 执行
-        let hidden_states = self.mlp.forward(&hidden_states, prefetch_expert_list.as_deref())?; // 支持 prefetch_expert_list
+        let hidden_states = self
+            .mlp
+            .forward(&hidden_states, prefetch_expert_list.as_deref())?; // 支持 prefetch_expert_list
 
         let hidden_states = (hidden_states + residual)?;
 
-        Ok((hidden_states, present_key_value.cloned(), next_prefetch_expert_list))
+        Ok((hidden_states, None, next_prefetch_expert_list))
     }
 }

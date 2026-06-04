@@ -1,11 +1,10 @@
 use candle_core::{Device, Error};
 use std::collections::HashMap;
 
-
 #[derive(Debug, Clone)]
 pub struct Qwen2MoeConfig {
     pub model_type: String,
-    
+
     pub vocab_size: usize,
     pub hidden_size: usize,
     pub intermediate_size: usize,
@@ -98,11 +97,7 @@ impl Qwen2MoeConfig {
 }
 
 pub fn get_qwen_config(name: &str) -> Result<Qwen2MoeConfig, Error> {
-    let name = name
-        .split('/')
-        .last()
-        .unwrap_or(name)
-        .to_ascii_lowercase();
+    let name = name.split('/').last().unwrap_or(name).to_ascii_lowercase();
 
     match name.as_str() {
         "qwen1.5-moe-a2.7b" => Ok(Qwen2MoeConfig::new()),

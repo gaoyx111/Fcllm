@@ -1,6 +1,6 @@
-use std::collections::HashMap;
-use candle_core::{DType, Device, Result, Tensor, IndexOp, D};
 use crate::configuration_qwen::Qwen2MoeConfig;
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct Cache {
@@ -21,7 +21,7 @@ pub fn calculate_default_inv_freq(cfg: &Qwen2MoeConfig) -> Vec<f32> {
 }
 
 impl Cache {
-/*     pub fn new(use_kv_cache: bool, dtype: DType, config: &Qwen2MoeConfig, device: &Device) -> Result<Self> {
+    /*     pub fn new(use_kv_cache: bool, dtype: DType, config: &Qwen2MoeConfig, device: &Device) -> Result<Self> {
         // precompute freqs_cis
         let theta = match &config.rope_scaling {
             None
@@ -87,9 +87,7 @@ impl Cache {
 
         // 创建 [max_seq_len, head_dim/2] 的位置矩阵和频率乘积
         let freqs: Vec<f32> = (0..max_seq_len)
-            .flat_map(|pos| {
-                inv_freq.iter().map(move |f| pos as f32 * f)
-            })
+            .flat_map(|pos| inv_freq.iter().map(move |f| pos as f32 * f))
             .collect();
 
         let freqs_tensor = Tensor::from_vec(freqs, (max_seq_len, inv_freq.len()), &config.device)?/* .to_dtype(dtype)? */;
@@ -129,7 +127,7 @@ impl Cache {
         }
     }
 
-/*     pub fn update_kv(
+    /*     pub fn update_kv(
         &mut self,
         key: &Tensor,
         value: &Tensor,
@@ -171,7 +169,7 @@ impl Cache {
         Ok((k_cache, v_cache))
     } */
 
-   pub fn update_kv(
+    pub fn update_kv(
         &mut self,
         key: &Tensor,
         value: &Tensor,
@@ -185,22 +183,18 @@ impl Cache {
             return Ok((key.clone(), value.clone()));
         }
 
-        let (mut k_cache, mut v_cache) = self.kvs[layer_idx].clone().unwrap();
+        let (k_cache, v_cache) = self.kvs[layer_idx].take().unwrap();
 
-        let mut k = Tensor::cat(&[k_cache, key.clone()], 2)?.contiguous()?;
-        let mut v = Tensor::cat(&[v_cache, value.clone()], 2)?.contiguous()?;
+        let mut k = Tensor::cat(&[&k_cache, key], 2)?.contiguous()?;
+        let mut v = Tensor::cat(&[&v_cache, value], 2)?.contiguous()?;
         // k shape: [B, H, S, D] — dims()[2] is the seq_len dimension
         let k_seq_len = k.dims()[2];
         if k_seq_len > 8192 {
-            k = k
-                .narrow(2, k_seq_len - 8192, 8192)?
-                .contiguous()?
+            k = k.narrow(2, k_seq_len - 8192, 8192)?.contiguous()?
         }
         let v_seq_len = v.dims()[2];
         if v_seq_len > 8192 {
-            v = v
-                .narrow(2, v_seq_len - 8192, 8192)?
-                .contiguous()?
+            v = v.narrow(2, v_seq_len - 8192, 8192)?.contiguous()?
         }
 
         self.kvs[layer_idx] = Some((k.clone(), v.clone()));

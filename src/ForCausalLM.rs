@@ -1,15 +1,135 @@
-use crate::configuration_qwen::{Qwen2MoeConfig, get_qwen_config};
+use crate::Cache::Cache;
 use crate::Model::Qwen2MoeModel;
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D, Error, CudaDevice};
-use candle_nn::{Module, Linear};
+use crate::args::Args;
+use crate::configuration_qwen::{Qwen2MoeConfig, get_qwen_config};
 use crate::linear::new_uninitialized_linear;
 use crate::load::load_linear_from_files;
-use crate::Cache::Cache;
 use crate::utils::memory_cost_qwen;
+use candle_core::{DType, Device, Result, Tensor};
+use candle_nn::{Linear, Module};
+use std::collections::HashSet;
 use std::path::PathBuf;
-use crate::args::Args;
+use std::time::Instant;
 
+const GENERATION_REPETITION_PENALTY: f32 = 1.15;
+const GENERATION_NO_REPEAT_NGRAM_SIZE: usize = 4;
 
+fn tensor_first_row_u32(input_ids: &Tensor) -> Result<Vec<u32>> {
+    let rows = input_ids.to_vec2::<i64>()?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| (id >= 0).then_some(id as u32))
+        .collect())
+}
+
+fn select_next_token_with_repetition_controls(
+    logits: &[f32],
+    context_ids: &[u32],
+    repetition_penalty: f32,
+    no_repeat_ngram_size: usize,
+) -> u32 {
+    let mut scores = logits.to_vec();
+    apply_repetition_penalty(&mut scores, context_ids, repetition_penalty);
+
+    for token_id in banned_no_repeat_tokens(context_ids, no_repeat_ngram_size) {
+        if let Some(score) = scores.get_mut(token_id as usize) {
+            *score = f32::NEG_INFINITY;
+        }
+    }
+
+    argmax_score(&scores).unwrap_or(0)
+}
+
+fn apply_repetition_penalty(scores: &mut [f32], token_ids: &[u32], penalty: f32) {
+    if penalty <= 1.0 {
+        return;
+    }
+
+    let mut seen = HashSet::new();
+    for &token_id in token_ids {
+        if !seen.insert(token_id) {
+            continue;
+        }
+
+        let Some(score) = scores.get_mut(token_id as usize) else {
+            continue;
+        };
+
+        if *score > 0.0 {
+            *score /= penalty;
+        } else {
+            *score *= penalty;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repetition_penalty_can_move_selection_off_repeated_token() {
+        let logits = vec![1.0, 2.0, 1.9];
+
+        let selected = select_next_token_with_repetition_controls(&logits, &[1, 1, 1], 1.15, 0);
+
+        assert_eq!(selected, 2);
+    }
+
+    #[test]
+    fn no_repeat_ngram_bans_token_that_would_repeat_context() {
+        let mut logits = vec![0.0; 20];
+        logits[12] = 10.0;
+        logits[13] = 9.0;
+
+        let selected =
+            select_next_token_with_repetition_controls(&logits, &[10, 11, 12, 10, 11], 1.0, 3);
+
+        assert_eq!(banned_no_repeat_tokens(&[10, 11, 12, 10, 11], 3), vec![12]);
+        assert_eq!(selected, 13);
+    }
+}
+
+fn banned_no_repeat_tokens(token_ids: &[u32], ngram_size: usize) -> Vec<u32> {
+    if ngram_size < 2 || token_ids.len() + 1 < ngram_size {
+        return Vec::new();
+    }
+
+    let prefix_len = ngram_size - 1;
+    let current_prefix = &token_ids[token_ids.len() - prefix_len..];
+    let mut banned = Vec::new();
+
+    for window in token_ids.windows(ngram_size) {
+        if &window[..prefix_len] == current_prefix {
+            let token_id = window[prefix_len];
+            if !banned.contains(&token_id) {
+                banned.push(token_id);
+            }
+        }
+    }
+
+    banned
+}
+
+fn argmax_score(scores: &[f32]) -> Option<u32> {
+    let mut best: Option<(usize, f32)> = None;
+
+    for (idx, &score) in scores.iter().enumerate() {
+        if score.is_nan() {
+            continue;
+        }
+
+        match best {
+            Some((_, best_score)) if score <= best_score => {}
+            _ => best = Some((idx, score)),
+        }
+    }
+
+    best.map(|(idx, _)| idx as u32)
+}
 
 #[derive(Debug)]
 pub struct Qwen2MoeForCausalLM {
@@ -30,7 +150,13 @@ impl Qwen2MoeForCausalLM {
     pub fn new(args: Args) -> Result<Self> {
         let mut config = get_qwen_config(&args.model)?;
         config.device = if args.device.starts_with("cuda") {
-            let index: usize = args.device.split(':').nth(1).unwrap_or("0").parse().unwrap_or(0);
+            let index: usize = args
+                .device
+                .split(':')
+                .nth(1)
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0);
             Device::cuda_if_available(index)?
         } else {
             Device::Cpu
@@ -46,7 +172,8 @@ impl Qwen2MoeForCausalLM {
         println!("quan_map: {:?}", config.quan_map);
 
         let model = Qwen2MoeModel::new(&config)?;
-        let lm_head = new_uninitialized_linear(config.hidden_size, config.vocab_size, false, &device)?;
+        let lm_head =
+            new_uninitialized_linear(config.hidden_size, config.vocab_size, false, &device)?;
 
         let path_str = args.path.to_str().expect("invalid UTF-8").to_owned();
         let n1 = config.num_experts;
@@ -66,19 +193,15 @@ impl Qwen2MoeForCausalLM {
             num_experts: n1,
             num_experts_per_tok: n2,
         })
-    }// 注意new函数里没有init_weights!!!记得在main函数里new模型之后加上init_weights!!!
+    } // 注意new函数里没有init_weights!!!记得在main函数里new模型之后加上init_weights!!!
 
     pub fn init_weights(&mut self) -> Result<()> {
         let base = PathBuf::from(self.path.clone());
         // 拼接出 expanded_path: path/Qwen/Qwen1.5-MoE-A2.7B
-        let expanded_path = base
-            .join("Qwen")
-            .join("Qwen1.5-MoE-A2.7B");
+        let expanded_path = base.join("Qwen").join("Qwen1.5-MoE-A2.7B");
 
         // 拼接 check_path: path/Qwen/Qwen1.5-MoE-A2.7B/original/lm_head.weight
-        let check_path = expanded_path
-            .join("original")
-            .join("lm_head.weight");
+        let check_path = expanded_path.join("original").join("lm_head.weight");
 
         // 若文件不存在，则下载
         if !check_path.exists() {
@@ -90,7 +213,8 @@ impl Qwen2MoeForCausalLM {
         // 加载主模型权重
         self.model.init_weights(expanded_path.to_str().unwrap())?;
         // 加载 lm_head 权重
-        self.lm_head = load_linear_from_files(check_path.to_str().unwrap(),  None, &self.config.device)?;
+        self.lm_head =
+            load_linear_from_files(check_path.to_str().unwrap(), None, &self.config.device)?;
 
         Ok(())
     }
@@ -126,19 +250,26 @@ impl Qwen2MoeForCausalLM {
         if logits_input.dim(1)? > 1 {
             let li_f32 = logits_input.to_dtype(DType::F32)?;
             let li_abs_max = li_f32.flatten_all()?.abs()?.max(0)?;
-            eprintln!("[DEBUG] hidden_states → lm_head input: shape={:?}, dtype={:?}, abs_max={:?}",
-                logits_input.shape(), logits_input.dtype(), li_abs_max.to_scalar::<f32>());
+            eprintln!(
+                "[DEBUG] hidden_states → lm_head input: shape={:?}, dtype={:?}, abs_max={:?}",
+                logits_input.shape(),
+                logits_input.dtype(),
+                li_abs_max.to_scalar::<f32>()
+            );
             let w = self.lm_head.weight().to_dtype(DType::F32)?;
             let w_abs_max = w.flatten_all()?.abs()?.max(0)?;
-            eprintln!("[DEBUG] lm_head weight: shape={:?}, dtype={:?}, abs_max={:?}",
-                self.lm_head.weight().shape(), self.lm_head.weight().dtype(), w_abs_max.to_scalar::<f32>());
+            eprintln!(
+                "[DEBUG] lm_head weight: shape={:?}, dtype={:?}, abs_max={:?}",
+                self.lm_head.weight().shape(),
+                self.lm_head.weight().dtype(),
+                w_abs_max.to_scalar::<f32>()
+            );
         }
 
         let logits = self.lm_head.forward(&logits_input)?;
 
         Ok((logits, new_past_key_values))
     }
-
 
     /// 流式生成：每产出一个 token 就调用 callback
     ///
@@ -168,8 +299,12 @@ impl Qwen2MoeForCausalLM {
             Tensor::arange(0u32, seq_len as u32, &device)?.reshape((seq_len,))?;
 
         let mut input_ids = input_ids.clone();
+        let mut context_ids = tensor_first_row_u32(&input_ids)?;
+
+        let generation_start = Instant::now();
 
         for _i in 0..self.max_length {
+            let iter_start = Instant::now();
             let (logits, new_cache) = self.forward(
                 Some(&input_ids),
                 Some(&attention_mask),
@@ -177,33 +312,52 @@ impl Qwen2MoeForCausalLM {
                 past_key_values,
                 None,
                 Some(&cache_position),
-                0,
+                1,
             )?;
+            let forward_elapsed = iter_start.elapsed();
 
             past_key_values = new_cache;
 
-            let dim = logits.dims().len() - 1;
-            let logits = candle_nn::ops::softmax(&logits, dim)?;
-            let next_token = logits.argmax(dim)?;
-
-            // prefill 阶段取最后一个位置的预测；decoding 阶段只有 1 个位置
-            let last_token = next_token.narrow(1, next_token.dim(1)? - 1, 1)?;
-            let tok_id = last_token.i((0, 0))?.to_scalar::<u32>()?;
+            let last_logits = logits
+                .narrow(1, logits.dim(1)? - 1, 1)?
+                .squeeze(1)?
+                .squeeze(0)?
+                .to_dtype(DType::F32)?;
+            let scores = last_logits.to_vec1::<f32>()?;
+            let tok_id = select_next_token_with_repetition_controls(
+                &scores,
+                &context_ids,
+                GENERATION_REPETITION_PENALTY,
+                GENERATION_NO_REPEAT_NGRAM_SIZE,
+            );
+            let last_token = Tensor::new(&[tok_id as i64], &device)?.reshape((1, 1))?;
 
             // 遇到任意停止 token 就结束（含 <|im_end|>=151645、<|im_start|>=151644、<|endoftext|>=151643）
             if self.config.stop_token_ids.contains(&tok_id) {
-                eprintln!("[gen] stop_token_ids 命中: tok_id={} 第 {} 个 token", tok_id, _i);
+                eprintln!(
+                    "[gen] stop_token_ids 命中: tok_id={} 第 {} 个 token",
+                    tok_id, _i
+                );
                 break;
             }
             // 调试：打印前 5 个 token id，方便核实模型输出
             if _i < 5 {
                 eprintln!("[gen debug] iter={} tok_id={}", _i, tok_id);
             }
+            if _i < 8 || _i % 16 == 0 {
+                eprintln!(
+                    "[gen timing] iter={} forward={:.2?} total={:.2?}",
+                    _i,
+                    forward_elapsed,
+                    generation_start.elapsed()
+                );
+            }
 
             // 调用回调；若返回 false（通道关闭）则停止生成
             if !callback(tok_id) {
                 break;
             }
+            context_ids.push(tok_id);
 
             // 准备下一轮输入
             input_ids = last_token.to_dtype(DType::I64)?;
@@ -255,6 +409,7 @@ impl Qwen2MoeForCausalLM {
             Tensor::arange(0u32, seq_len as u32, &device)?.reshape((seq_len,))?;
 
         let mut input_ids = input_ids.clone();
+        let mut context_ids = tensor_first_row_u32(&input_ids)?;
         let mut output = None;
 
         for i in 0..1024 {
@@ -265,12 +420,10 @@ impl Qwen2MoeForCausalLM {
                 past_key_values,
                 None,
                 Some(&cache_position),
-                0,
+                1,
             )?;
 
             past_key_values = new_cache;
-
-            let dim = logits.dims().len() - 1;
 
             // 检查第一次迭代的 logits 是否有 NaN
             if i == 0 {
@@ -278,38 +431,48 @@ impl Qwen2MoeForCausalLM {
                 let max_val = last_logits.max(candle_core::D::Minus1)?;
                 let min_val = last_logits.min(candle_core::D::Minus1)?;
                 let raw_argmax = last_logits.argmax(candle_core::D::Minus1)?;
-                eprintln!("[DEBUG] first iter logits: max={:?}, min={:?}, argmax={:?}, shape={:?}",
+                eprintln!(
+                    "[DEBUG] first iter logits: max={:?}, min={:?}, argmax={:?}, shape={:?}",
                     max_val.to_vec1::<f32>().unwrap_or_default(),
                     min_val.to_vec1::<f32>().unwrap_or_default(),
                     raw_argmax.to_vec1::<u32>().unwrap_or_default(),
-                    logits.shape());
+                    logits.shape()
+                );
             }
 
-            let logits = candle_nn::ops::softmax(&logits, dim)?;
-
-            // 贪婪搜索：取最大概率的 token
-            let dim = logits.dims().len() - 1;
-            let next_token = logits.argmax(dim)?;
+            let last_logits = logits
+                .narrow(1, logits.dim(1)? - 1, 1)?
+                .squeeze(1)?
+                .squeeze(0)?
+                .to_dtype(DType::F32)?;
+            let scores = last_logits.to_vec1::<f32>()?;
+            let tok_id = select_next_token_with_repetition_controls(
+                &scores,
+                &context_ids,
+                GENERATION_REPETITION_PENALTY,
+                GENERATION_NO_REPEAT_NGRAM_SIZE,
+            );
+            let next_token = Tensor::new(&[tok_id as i64], &device)?.reshape((1, 1))?;
 
             if i == 0 {
-                output = Some(next_token.narrow(1, next_token.dim(1)? - 1, 1)?);
+                output = Some(next_token.clone());
             } else {
                 output = Some(Tensor::cat(&[&output.unwrap(), &next_token], 1)?);
             }
 
-            input_ids = next_token.narrow(1, next_token.dim(1)? - 1, 1)?.to_dtype(DType::I64)?;
+            input_ids = next_token.to_dtype(DType::I64)?;
 
             // 早停
             // if self.early_stopping && i > self.min_length && input_ids.to_vec1::<i64>()?[0] == self.config.eos_token_id as i64 {
             //     return Ok((output.unwrap(), prefill_time));
             // }
 
-            let tok_id = input_ids.i((0, 0))?.to_scalar::<i64>()?;
             if i < 5 || i % 50 == 0 {
                 eprintln!("[token {}] id={}", i, tok_id);
             }
+            context_ids.push(tok_id);
             // 同样检查所有停止 token（<|im_end|> / <|im_start|> / <|endoftext|>）
-            if self.config.stop_token_ids.contains(&(tok_id as u32)) {
+            if self.config.stop_token_ids.contains(&tok_id) {
                 return Ok((output.unwrap(), prefill_time));
             }
 

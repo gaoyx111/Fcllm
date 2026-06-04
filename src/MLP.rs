@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use candle_core::{Device, Result, Tensor, Error};
-use candle_nn::Activation;
 use crate::configuration_qwen::Qwen2MoeConfig;
 use crate::load::ExpertTensorLoader;
 use crate::quantizer::dequantize;
+use candle_core::{Device, Error, Result, Tensor};
+use candle_nn::Activation;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -56,8 +56,13 @@ impl Qwen2MoeMLP {
         }
     }
 
-    pub fn init_weights(&mut self, path: &str, idx: Option<usize>, num_in_mem: Option<usize>) -> Result<()> {
-        if idx.is_none(){
+    pub fn init_weights(
+        &mut self,
+        path: &str,
+        idx: Option<usize>,
+        num_in_mem: Option<usize>,
+    ) -> Result<()> {
+        if idx.is_none() {
             let base = PathBuf::from(path);
             let original_dir = base.join("original");
 
@@ -69,7 +74,7 @@ impl Qwen2MoeMLP {
             let gate_proj_path = original_dir.join(gate_proj_file);
             let up_proj_path = original_dir.join(up_proj_file);
             let down_proj_path = original_dir.join(down_proj_file);
-            
+
             let loader1 = ExpertTensorLoader::new(gate_proj_path);
             let loader2 = ExpertTensorLoader::new(up_proj_path);
             let loader3 = ExpertTensorLoader::new(down_proj_path);
@@ -77,33 +82,36 @@ impl Qwen2MoeMLP {
             self.gate = Some(loader1.load_tensor("tensor", &self.device)?);
             self.up = Some(loader2.load_tensor("tensor", &self.device)?);
             self.down = Some(loader3.load_tensor("tensor", &self.device)?);
-        }
-        else{
+        } else {
             self.idx = idx;
             let mut weight_path: HashMap<usize, PathBuf> = HashMap::new();
-            let base_path = PathBuf::from(path);  // path 是根目录字符串
+            let base_path = PathBuf::from(path); // path 是根目录字符串
 
             // locate fp16 weights
             weight_path.insert(
                 0,
-                base_path
-                    .join("original")
-                    .join(format!("model.layers.{}.mlp.experts.{}.weight", self.layer_idx, idx.unwrap())),
+                base_path.join("original").join(format!(
+                    "model.layers.{}.mlp.experts.{}.weight",
+                    self.layer_idx,
+                    idx.unwrap()
+                )),
             );
             // locate int4/2 weights
             weight_path.insert(
                 4,
-                base_path
-                    .join("quantized")
-                    .join("int4")
-                    .join(format!("model.layers.{}.mlp.experts.{}.weight", self.layer_idx, idx.unwrap())),
+                base_path.join("quantized").join("int4").join(format!(
+                    "model.layers.{}.mlp.experts.{}.weight",
+                    self.layer_idx,
+                    idx.unwrap()
+                )),
             );
             weight_path.insert(
                 2,
-                base_path
-                    .join("quantized")
-                    .join("int2")
-                    .join(format!("model.layers.{}.mlp.experts.{}.weight", self.layer_idx, idx.unwrap())),
+                base_path.join("quantized").join("int2").join(format!(
+                    "model.layers.{}.mlp.experts.{}.weight",
+                    self.layer_idx,
+                    idx.unwrap()
+                )),
             );
 
             let init_device = Device::Cpu;
@@ -181,7 +189,11 @@ impl Qwen2MoeMLP {
         Ok(())
     }
 
-    pub fn extract_keys(&self, prefix: &str, tensors: &mut HashMap<String, Tensor>) -> HashMap<String, Tensor> {
+    pub fn extract_keys(
+        &self,
+        prefix: &str,
+        tensors: &mut HashMap<String, Tensor>,
+    ) -> HashMap<String, Tensor> {
         let mut map = HashMap::new();
 
         if let Some(nbits) = tensors.remove(&format!("{}_nbits", prefix)) {
@@ -233,25 +245,40 @@ impl Qwen2MoeMLP {
         let quan_bit = nbit.unwrap_or(self.quan_bit);
 
         // 从 CPU 缓存中获取指定位宽的权重 map
-        let gate_cpu = self.gate_cpu.get(&quan_bit)
+        let gate_cpu = self
+            .gate_cpu
+            .get(&quan_bit)
             .ok_or_else(|| Error::Msg(format!("Missing gate_cpu for quan_bit {}", quan_bit)))?;
-        let up_cpu = self.up_cpu.get(&quan_bit)
+        let up_cpu = self
+            .up_cpu
+            .get(&quan_bit)
             .ok_or_else(|| Error::Msg(format!("Missing up_cpu for quan_bit {}", quan_bit)))?;
-        let down_cpu = self.down_cpu.get(&quan_bit)
+        let down_cpu = self
+            .down_cpu
+            .get(&quan_bit)
             .ok_or_else(|| Error::Msg(format!("Missing down_cpu for quan_bit {}", quan_bit)))?;
 
         // 只取出 W_q 并移动到目标 device
-        self.gate = Some(gate_cpu.get("W_q")
-            .ok_or_else(|| Error::Msg("Missing W_q in gate".into()))?
-            .to_device(&self.device)?);
+        self.gate = Some(
+            gate_cpu
+                .get("W_q")
+                .ok_or_else(|| Error::Msg("Missing W_q in gate".into()))?
+                .to_device(&self.device)?,
+        );
 
-        self.up = Some(up_cpu.get("W_q")
-            .ok_or_else(|| Error::Msg("Missing W_q in up".into()))?
-            .to_device(&self.device)?);
+        self.up = Some(
+            up_cpu
+                .get("W_q")
+                .ok_or_else(|| Error::Msg("Missing W_q in up".into()))?
+                .to_device(&self.device)?,
+        );
 
-        self.down = Some(down_cpu.get("W_q")
-            .ok_or_else(|| Error::Msg("Missing W_q in down".into()))?
-            .to_device(&self.device)?);
+        self.down = Some(
+            down_cpu
+                .get("W_q")
+                .ok_or_else(|| Error::Msg("Missing W_q in down".into()))?
+                .to_device(&self.device)?,
+        );
 
         Ok(())
     }
@@ -261,13 +288,19 @@ impl Qwen2MoeMLP {
             let quan_bit = self.quan_bit;
 
             // 从 CPU 缓存中获取对应 bit 的权重 map
-            let gate_cpu = self.gate_cpu.get(&quan_bit)
+            let gate_cpu = self
+                .gate_cpu
+                .get(&quan_bit)
                 .ok_or_else(|| candle_core::Error::Msg("Missing gate_cpu for quan_bit".into()))?;
-            let up_cpu = self.up_cpu.get(&quan_bit)
+            let up_cpu = self
+                .up_cpu
+                .get(&quan_bit)
                 .ok_or_else(|| candle_core::Error::Msg("Missing up_cpu for quan_bit".into()))?;
-            let down_cpu = self.down_cpu.get(&quan_bit)
+            let down_cpu = self
+                .down_cpu
+                .get(&quan_bit)
                 .ok_or_else(|| candle_core::Error::Msg("Missing down_cpu for quan_bit".into()))?;
-            
+
             // 调用 dequantize 解码
             let gate_dequan = dequantize(&gate_cpu)?;
             let up_dequan = dequantize(&up_cpu)?;
@@ -286,11 +319,17 @@ impl Qwen2MoeMLP {
             let quan_bit = self.quan_bit;
 
             // 从 CPU 缓存中获取对应 bit 的权重 map
-            let gate_cpu = self.gate_cpu.get(&quan_bit)
+            let gate_cpu = self
+                .gate_cpu
+                .get(&quan_bit)
                 .ok_or_else(|| candle_core::Error::Msg("Missing gate_cpu for quan_bit".into()))?;
-            let up_cpu = self.up_cpu.get(&quan_bit)
+            let up_cpu = self
+                .up_cpu
+                .get(&quan_bit)
                 .ok_or_else(|| candle_core::Error::Msg("Missing up_cpu for quan_bit".into()))?;
-            let down_cpu = self.down_cpu.get(&quan_bit)
+            let down_cpu = self
+                .down_cpu
+                .get(&quan_bit)
                 .ok_or_else(|| candle_core::Error::Msg("Missing down_cpu for quan_bit".into()))?;
 
             // 调用 load_from_cpu 移动到 device（返回的是 HashMap<String, Tensor>）
@@ -299,12 +338,24 @@ impl Qwen2MoeMLP {
             let down_loaded = self.load_from_cpu(down_cpu)?;
 
             // 提取 W_q 张量赋值
-            self.gate = Some(gate_loaded.get("W_q")
-                .ok_or_else(|| candle_core::Error::Msg("Missing W_q in gate_loaded".into()))?.clone());
-            self.up = Some(up_loaded.get("W_q")
-                .ok_or_else(|| candle_core::Error::Msg("Missing W_q in up_loaded".into()))?.clone());
-            self.down = Some(down_loaded.get("W_q")
-                .ok_or_else(|| candle_core::Error::Msg("Missing W_q in down_loaded".into()))?.clone());
+            self.gate = Some(
+                gate_loaded
+                    .get("W_q")
+                    .ok_or_else(|| candle_core::Error::Msg("Missing W_q in gate_loaded".into()))?
+                    .clone(),
+            );
+            self.up = Some(
+                up_loaded
+                    .get("W_q")
+                    .ok_or_else(|| candle_core::Error::Msg("Missing W_q in up_loaded".into()))?
+                    .clone(),
+            );
+            self.down = Some(
+                down_loaded
+                    .get("W_q")
+                    .ok_or_else(|| candle_core::Error::Msg("Missing W_q in down_loaded".into()))?
+                    .clone(),
+            );
         }
 
         Ok(())
@@ -333,15 +384,14 @@ impl Qwen2MoeMLP {
             .ok_or_else(|| candle_core::Error::Msg("Missing down tensor".to_string()))?
             .to_dtype(x.dtype())?;
 
-        let gate_out = x.matmul(&gate.transpose(0,1)?)?;
+        let gate_out = x.matmul(&gate.transpose(0, 1)?)?;
         let gate_act = candle_nn::ops::silu(&gate_out)?;
-        let up_out = x.matmul(&up.transpose(0,1)?)?;
+        let up_out = x.matmul(&up.transpose(0, 1)?)?;
         let fused = gate_act.mul(&up_out)?;
-        let out = fused.matmul(&down.transpose(0,1)?)?;
+        let out = fused.matmul(&down.transpose(0, 1)?)?;
         Ok(out)
     }
 }
-
 
 pub fn map_activation(name: &str) -> Result<Activation> {
     match name.to_lowercase().as_str() {

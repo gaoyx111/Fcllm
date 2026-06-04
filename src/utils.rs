@@ -1,7 +1,7 @@
-use candle_core::{Result, Tensor, DType, Error};
-use std::collections::HashMap;
-use nvml_wrapper::Nvml;
 use crate::configuration_qwen::Qwen2MoeConfig;
+use candle_core::{DType, Error, Result, Tensor};
+use nvml_wrapper::Nvml;
+use std::collections::HashMap;
 
 pub fn pack_8bit_u8(w_q: &Tensor) -> Result<Tensor> {
     w_q.to_dtype(DType::U8)
@@ -10,7 +10,6 @@ pub fn pack_8bit_u8(w_q: &Tensor) -> Result<Tensor> {
 pub fn unpack_8bit_u8(w_q: &Tensor, dtype: DType) -> Result<Tensor> {
     w_q.to_dtype(dtype)
 }
-
 
 pub fn pack_4bit_u8(w_q: &Tensor) -> Result<Tensor> {
     let w_q = w_q.to_dtype(DType::U8)?;
@@ -35,7 +34,9 @@ pub fn unpack_4bit_u8(w_q: &Tensor, dtype: DType) -> Result<Tensor> {
     let shape = w_q.shape();
     let dims = shape.dims();
     if dims.len() != 2 {
-        return Err(candle_core::Error::Msg("unpack_4bit_u8 expects a 2D tensor".into()));
+        return Err(candle_core::Error::Msg(
+            "unpack_4bit_u8 expects a 2D tensor".into(),
+        ));
     }
 
     let step = dims[0];
@@ -94,7 +95,9 @@ pub fn unpack_2bit_u8(w_q: &Tensor, dtype: DType) -> Result<Tensor> {
     let shape = w_q.shape();
     let dims = shape.dims();
     if dims.len() != 2 {
-        return Err(candle_core::Error::Msg("unpack_2bit_u8 expects a 2D tensor".into()));
+        return Err(candle_core::Error::Msg(
+            "unpack_2bit_u8 expects a 2D tensor".into(),
+        ));
     }
 
     let step = dims[0];
@@ -115,7 +118,6 @@ pub fn unpack_2bit_u8(w_q: &Tensor, dtype: DType) -> Result<Tensor> {
     }
     Tensor::from_vec(unpacked, (4 * step, cols), w_q.device())?.to_dtype(dtype)
 }
-
 
 pub fn pack_3bit_32(w_q_in: &Tensor) -> Result<Tensor> {
     let shape = w_q_in.shape();
@@ -180,7 +182,6 @@ pub fn unpack_3bit_32(w_q: &Tensor, dtype: DType) -> Result<Tensor> {
     Tensor::from_vec(unpacked, (step * 10, cols), w_q.device())?.to_dtype(dtype)
 }
 
-
 pub fn pack_1bit_u8(w_q: &Tensor) -> Result<Tensor> {
     let w_q = w_q.to_dtype(DType::U8)?;
     let len = w_q.shape().dims()[0];
@@ -196,12 +197,12 @@ pub fn pack_1bit_u8(w_q: &Tensor) -> Result<Tensor> {
         let mut byte = 0u8;
         byte |= vec[i] << 7;
         byte |= vec[i + step] << 6;
-        byte |= vec[i + 2*step] << 5;
-        byte |= vec[i + 3*step] << 4;
-        byte |= vec[i + 4*step] << 3;
-        byte |= vec[i + 5*step] << 2;
-        byte |= vec[i + 6*step] << 1;
-        byte |= vec[i + 7*step];
+        byte |= vec[i + 2 * step] << 5;
+        byte |= vec[i + 3 * step] << 4;
+        byte |= vec[i + 4 * step] << 3;
+        byte |= vec[i + 5 * step] << 2;
+        byte |= vec[i + 6 * step] << 1;
+        byte |= vec[i + 7 * step];
         packed.push(byte);
     }
     Tensor::from_vec(packed, (step,), w_q.device())
@@ -211,7 +212,9 @@ pub fn unpack_1bit_u8(w_q: &Tensor, dtype: DType) -> Result<Tensor> {
     let shape = w_q.shape();
     let dims = shape.dims();
     if dims.len() != 2 {
-        return Err(candle_core::Error::Msg("unpack_1bit_u8 expects a 2D tensor".into()));
+        return Err(candle_core::Error::Msg(
+            "unpack_1bit_u8 expects a 2D tensor".into(),
+        ));
     }
     let step = dims[0];
     let cols = dims[1];
@@ -230,7 +233,6 @@ pub fn unpack_1bit_u8(w_q: &Tensor, dtype: DType) -> Result<Tensor> {
     }
     Tensor::from_vec(unpacked, (8 * step, cols), w_q.device())?.to_dtype(dtype)
 }
-
 
 pub const SUPPORTED_BITS: &[usize] = &[8, 4, 3, 2, 1];
 
@@ -256,18 +258,21 @@ pub fn unpack(w_q: &Tensor, bits: usize, dtype: DType) -> Result<Tensor> {
     }
 }
 
-
-
-pub const KB: usize = 1 << 10;          // 1024
-pub const MB: usize = 1 << 20;          // 1024 * 1024
-pub const GB: usize = 1 << 30;          // 1024 * 1024 * 1024
-pub const T: f64 = 1e12;                // 万亿级常量，用于浮点计算
+pub const KB: usize = 1 << 10; // 1024
+pub const MB: usize = 1 << 20; // 1024 * 1024
+pub const GB: usize = 1 << 30; // 1024 * 1024 * 1024
+pub const T: f64 = 1e12; // 万亿级常量，用于浮点计算
 
 // 获取指定 cuda 设备编号的显存使用和总显存（单位 MB）
 fn get_gpu_memory_usage(device_id: u32) -> Result<(usize, usize)> {
-    let nvml = Nvml::init().map_err(|e| candle_core::Error::Msg(format!("NVML init error: {e}")))?;
-    let device = nvml.device_by_index(device_id).map_err(|e| candle_core::Error::Msg(format!("Device access error: {e}")))?;
-    let mem_info = device.memory_info().map_err(|e| candle_core::Error::Msg(format!("Memory info error: {e}")))?;
+    let nvml =
+        Nvml::init().map_err(|e| candle_core::Error::Msg(format!("NVML init error: {e}")))?;
+    let device = nvml
+        .device_by_index(device_id)
+        .map_err(|e| candle_core::Error::Msg(format!("Device access error: {e}")))?;
+    let mem_info = device
+        .memory_info()
+        .map_err(|e| candle_core::Error::Msg(format!("Memory info error: {e}")))?;
     Ok((mem_info.used as usize / MB, mem_info.total as usize / MB))
 }
 
@@ -310,19 +315,17 @@ pub fn memory_cost_qwen(
     let max_position_embeddings = config.max_position_embeddings as f64;
 
     let embed = (vocab_size * hidden_size * 2.0 * 2.0) / mb_f64;
-    let attention = (2.0 * (hidden_size * num_heads * head_dim
-        + hidden_size * num_key_value_heads * head_dim)
+    let attention = (2.0
+        * (hidden_size * num_heads * head_dim + hidden_size * num_key_value_heads * head_dim)
         * num_hidden_layers
         * 2.0)
         / mb_f64;
-    let attn_bias = ((num_heads * head_dim + 2.0 * num_key_value_heads * head_dim)
-        * num_hidden_layers
-        * 2.0)
-        / mb_f64;
-    let rotary_embedding = ((head_dim / 2.0 + head_dim * max_position_embeddings * 2.0)
-        * num_hidden_layers
-        * 4.0)
-        / mb_f64;
+    let attn_bias =
+        ((num_heads * head_dim + 2.0 * num_key_value_heads * head_dim) * num_hidden_layers * 2.0)
+            / mb_f64;
+    let rotary_embedding =
+        ((head_dim / 2.0 + head_dim * max_position_embeddings * 2.0) * num_hidden_layers * 4.0)
+            / mb_f64;
     let norm = ((2.0 * hidden_size * num_hidden_layers + hidden_size) * 2.0) / mb_f64;
 
     let shared_expert = (3.0 * hidden_size * shared_expert_intermediate_size * 2.0) / mb_f64;
@@ -351,7 +354,10 @@ pub fn memory_cost_qwen(
     available_memory = available_memory - meta_data - 1000.0;
 
     if available_memory < 0.0 {
-        panic!("Memory not enough for dense inference: available_memory = {}", available_memory);
+        panic!(
+            "Memory not enough for dense inference: available_memory = {}",
+            available_memory
+        );
     }
 
     let zero_scale = (2.0 * (moe_intermediate_size / 64.0 * hidden_size) * 1.0 * 4.0) / mb_f64;

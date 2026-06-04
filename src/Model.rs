@@ -1,13 +1,12 @@
-use candle_core::{Device, Result, Tensor, Error};
-use crate::configuration_qwen::Qwen2MoeConfig;
-use crate::load::ExpertTensorLoader;
-use std::path::PathBuf;
-use crate::RmsNorm::Qwen2MoeRMSNorm;
 use crate::Cache::Cache;
 use crate::DecoderLayer::Qwen2MoeDecoderLayer;
+use crate::RmsNorm::Qwen2MoeRMSNorm;
+use crate::configuration_qwen::Qwen2MoeConfig;
+use crate::load::ExpertTensorLoader;
 use crate::nn_embedding::Embedding;
+use candle_core::{Device, Error, Result, Tensor};
+use std::path::PathBuf;
 use tqdm::tqdm;
-
 
 #[derive(Debug)]
 pub struct Qwen2MoeModel {
@@ -22,7 +21,12 @@ pub struct Qwen2MoeModel {
 
 impl Qwen2MoeModel {
     pub fn new(cfg: &Qwen2MoeConfig) -> Result<Self> {
-        let embed_tokens = Embedding::new(cfg.vocab_size, cfg.hidden_size, Some(cfg.pad_token_id), &cfg.device)?;
+        let embed_tokens = Embedding::new(
+            cfg.vocab_size,
+            cfg.hidden_size,
+            Some(cfg.pad_token_id),
+            &cfg.device,
+        )?;
 
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
 
@@ -50,7 +54,7 @@ impl Qwen2MoeModel {
         // for (i, layer) in self.layers.iter_mut().enumerate() {
         //     layer.init_weights(path)?;
         // }
-        for i in tqdm(0..self.config.num_hidden_layers){
+        for i in tqdm(0..self.config.num_hidden_layers) {
             self.layers[i].init_weights(path)?;
         }
         // 加载最终 LayerNorm 权重
@@ -60,7 +64,9 @@ impl Qwen2MoeModel {
         let embed_path = original_dir.join("model.embed_tokens.weight");
         let loader = ExpertTensorLoader::new(embed_path.to_str().unwrap());
         let embed_weight = loader.load_tensor("tensor", &self.config.device)?;
-        self.embed_tokens = self.embed_tokens.from_weight(embed_weight, self.embed_tokens.padding_idx)?;
+        self.embed_tokens = self
+            .embed_tokens
+            .from_weight(embed_weight, self.embed_tokens.padding_idx)?;
 
         Ok(())
     }
@@ -92,9 +98,7 @@ impl Qwen2MoeModel {
         // 3. inputs_embeds 计算
         let inputs_embeds = match inputs_embeds {
             Some(embeds) => embeds.clone(),
-            None => {
-                self.embed_tokens.forward(input_ids.unwrap())?
-            }
+            None => self.embed_tokens.forward(input_ids.unwrap())?,
         };
 
         // 4. 计算 cache_position
@@ -120,7 +124,12 @@ impl Qwen2MoeModel {
         };
 
         // 6. 更新 causal_mask
-        let causal_mask = self._update_causal_mask(attention_mask, &inputs_embeds, &cache_position, &past_key_values)?;
+        let causal_mask = self._update_causal_mask(
+            attention_mask,
+            &inputs_embeds,
+            &cache_position,
+            &past_key_values,
+        )?;
 
         // 这里不支持非 None causal_mask
         if causal_mask.is_some() {
@@ -130,7 +139,6 @@ impl Qwen2MoeModel {
         // 7. forward，初始化 hidden_states
         let mut hidden_states = inputs_embeds;
 
-        let mut next_decoder_cache = None;
         let mut next_prefetch_expert_list = None;
 
         // 8. 逐层调用 decoder layer forward
@@ -143,7 +151,7 @@ impl Qwen2MoeModel {
                 None
             };
 
-            let (new_hidden_states, new_cache, new_prefetch) = layer.forward(
+            let (new_hidden_states, _new_cache, new_prefetch) = layer.forward(
                 &hidden_states,
                 causal_mask.as_ref(),
                 Some(&position_ids),
@@ -154,7 +162,6 @@ impl Qwen2MoeModel {
             )?;
 
             hidden_states = new_hidden_states;
-            next_decoder_cache = new_cache;
             next_prefetch_expert_list = new_prefetch;
         }
 
@@ -162,9 +169,7 @@ impl Qwen2MoeModel {
         hidden_states = self.norm.forward(&hidden_states)?;
 
         // 10. 根据 use_legacy_cache 决定 next_cache 返回形式 -> do nothing
-        let next_cache = next_decoder_cache;
-
-        Ok((hidden_states, next_cache))
+        Ok((hidden_states, past_key_values))
     }
 
     pub fn _update_causal_mask(
@@ -174,7 +179,7 @@ impl Qwen2MoeModel {
         cache_position: &Tensor,
         past_key_values: &Option<Cache>,
     ) -> Result<Option<Tensor>> {
-/*        let past_seen_tokens = if past_key_values.is_some(){
+        /*        let past_seen_tokens = if past_key_values.is_some(){
             past_key_values.get_seq_length()
         }else{
             0
@@ -223,8 +228,6 @@ impl Qwen2MoeModel {
     }
 }
 
-
-
 pub fn prepare_4d_causal_attention_mask_with_cache_position(
     attention_mask: Option<&Tensor>,
     sequence_length: usize,
@@ -263,7 +266,7 @@ pub fn prepare_4d_causal_attention_mask_with_cache_position(
 
     // 转 bool mask 为 float mask (0/1 转换为 0 / min_dtype_val)
     // candle_core 目前没有直接的 bool tensor，通常用 f32 0.0 / 1.0 实现
-    let scalar_tensor = Tensor::full(min_dtype_val, &[], device)?;  // 0-dim Tensor
+    let scalar_tensor = Tensor::full(min_dtype_val, &[], device)?; // 0-dim Tensor
     let mask_float = (mask_bool.to_dtype(dtype)? * scalar_tensor)?;
 
     // causal_mask shape (sequence_length, target_length)

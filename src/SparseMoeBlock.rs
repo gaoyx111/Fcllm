@@ -1,14 +1,14 @@
-use std::collections::HashMap;
-use candle_core::{DType, Device, Result, Tensor, D};
-use candle_nn::{Module, Linear};
-use crate::configuration_qwen::Qwen2MoeConfig;
-use crate::load::load_linear_from_files;
-use std::path::PathBuf;
 use crate::MLP::Qwen2MoeMLP;
+use crate::configuration_qwen::Qwen2MoeConfig;
 use crate::expert_ARC_cahce::ARC_Cache;
 use crate::linear::new_uninitialized_linear;
-use std::collections::HashSet;
+use crate::load::load_linear_from_files;
+use candle_core::{D, DType, Device, Result, Tensor};
 use candle_nn::encoding::one_hot;
+use candle_nn::{Linear, Module};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::path::PathBuf;
 
 #[derive(Debug)]
 pub struct Qwen2MoeSparseMoeBlock {
@@ -18,8 +18,8 @@ pub struct Qwen2MoeSparseMoeBlock {
     pub layer_idx: usize,
     pub device: Device,
     pub num_in_mem: usize,
-    pub arc_cache: ARC_Cache,    // 自定义 ARC_Cache 类型
-    pub gate: Linear,            // Candle 的线性层，没有 bias
+    pub arc_cache: ARC_Cache, // 自定义 ARC_Cache 类型
+    pub gate: Linear,         // Candle 的线性层，没有 bias
     pub experts: Vec<Qwen2MoeMLP>,
     pub shared_expert: Qwen2MoeMLP,
     pub shared_expert_gate: Linear,
@@ -69,16 +69,24 @@ impl Qwen2MoeSparseMoeBlock {
         let original_dir = base.join("original");
 
         // gate 权重路径
-        let gate_path = original_dir.join(format!("model.layers.{}.mlp.gate.weight", self.layer_idx));
+        let gate_path =
+            original_dir.join(format!("model.layers.{}.mlp.gate.weight", self.layer_idx));
         // let gate_loader = ExpertTensorLoader::new(gate_path);
         // let gate_weight = gate_loader.load_tensor("tensor", &self.device)?;
         self.gate = load_linear_from_files(gate_path.to_str().unwrap(), None, &self.device)?;
 
         // shared_expert_gate 权重路径
-        let shared_expert_gate_path = original_dir.join(format!("model.layers.{}.mlp.shared_expert_gate.weight", self.layer_idx));
+        let shared_expert_gate_path = original_dir.join(format!(
+            "model.layers.{}.mlp.shared_expert_gate.weight",
+            self.layer_idx
+        ));
         // let shared_expert_gate_loader = ExpertTensorLoader::new(shared_expert_gate_path);
         // let shared_expert_gate_weight = shared_expert_gate_loader.load_tensor("tensor", &self.device)?;
-        self.shared_expert_gate = load_linear_from_files(shared_expert_gate_path.to_str().unwrap(), None, &self.device)?;
+        self.shared_expert_gate = load_linear_from_files(
+            shared_expert_gate_path.to_str().unwrap(),
+            None,
+            &self.device,
+        )?;
 
         // experts 权重初始化，传入 idx 和 num_in_mem
         for idx in 0..self.num_experts {
@@ -91,7 +99,12 @@ impl Qwen2MoeSparseMoeBlock {
         Ok(())
     }
 
-    pub fn load_weights(&mut self, idx: Idx, is_now: bool, int2_experts: Option<&HashSet<usize>>) -> Result<()> {
+    pub fn load_weights(
+        &mut self,
+        idx: Idx,
+        is_now: bool,
+        int2_experts: Option<&HashSet<usize>>,
+    ) -> Result<()> {
         match idx {
             Idx::Single(i) => {
                 if self.arc_cache.is_evicted(i) {
@@ -102,7 +115,11 @@ impl Qwen2MoeSparseMoeBlock {
             Idx::Multiple(idxs) => {
                 for i in idxs {
                     if self.arc_cache.is_evicted(i) {
-                        let nbit = if int2_experts.map_or(false, |set| set.contains(&i)) { 2 } else { 4 };
+                        let nbit = if int2_experts.map_or(false, |set| set.contains(&i)) {
+                            2
+                        } else {
+                            4
+                        };
                         self.experts[i].load_weights(is_now, Some(nbit))?;
                     }
                 }
@@ -111,7 +128,7 @@ impl Qwen2MoeSparseMoeBlock {
         Ok(())
     }
 
-   pub fn post_comp(&mut self, expert_idx: usize) -> Result<()> {
+    pub fn post_comp(&mut self, expert_idx: usize) -> Result<()> {
         if self.num_in_mem == 0 {
             self.experts[expert_idx].clear();
         } else if self.layer_idx != 0 {
@@ -134,11 +151,15 @@ impl Qwen2MoeSparseMoeBlock {
 
         // gate score & top-k
         let router_logits = self.gate.forward(&hidden_states)?; // shape: (B*S, n_experts)
-        let (routing_weights, selected_experts) = topk_routing(&router_logits, self.top_k, self.norm_topk_prob)?;
+        let (routing_weights, selected_experts) =
+            topk_routing(&router_logits, self.top_k, self.norm_topk_prob)?;
         let routing_weights = routing_weights.to_dtype(hidden_states.dtype())?;
 
-        let mut final_hidden_states =
-            Tensor::zeros(&[batch_size * seq_len, hidden_dim], hidden_states.dtype(), hidden_states.device())?;
+        let mut final_hidden_states = Tensor::zeros(
+            &[batch_size * seq_len, hidden_dim],
+            hidden_states.dtype(),
+            hidden_states.device(),
+        )?;
 
         let selected_experts = selected_experts.to_dtype(DType::I64)?;
         let one_hot_encoded = one_hot(
@@ -155,7 +176,12 @@ impl Qwen2MoeSparseMoeBlock {
         ])?; // [bsz*seqlen, top_k, num_experts]
         expert_mask = expert_mask.permute((2, 1, 0))?;
 
-        let expert_index: Vec<usize> = selected_experts.flatten_all()?.to_vec1::<i64>()?.into_iter().map(|x| x as usize).collect();
+        let expert_index: Vec<usize> = selected_experts
+            .flatten_all()?
+            .to_vec1::<i64>()?
+            .into_iter()
+            .map(|x| x as usize)
+            .collect();
         let mut load_experts = vec![];
 
         let prefetch_expert_idx = match prefetch_expert_idx {
@@ -211,15 +237,23 @@ impl Qwen2MoeSparseMoeBlock {
             let row_idx = Tensor::from_vec(top_x_u32, n_tokens, routing_weights.device())?;
             let idx_u32: Vec<u32> = idx.iter().map(|&x| x as u32).collect();
             let col_idx = Tensor::from_vec(idx_u32, (n_tokens, 1), routing_weights.device())?;
-            let weights = routing_weights.index_select(&row_idx, 0)?.gather(&col_idx, 1)?;
+            let weights = routing_weights
+                .index_select(&row_idx, 0)?
+                .gather(&col_idx, 1)?;
 
             let expert_output = expert_layer.forward(&current_state)?;
-            let weights = weights.to_dtype(expert_output.dtype())?.broadcast_as(expert_output.shape())?;
+            let weights = weights
+                .to_dtype(expert_output.dtype())?
+                .broadcast_as(expert_output.shape())?;
             let current_hidden_states = (expert_output * weights)?;
 
             let top_x_i64: Vec<i64> = top_x.iter().map(|&x| x as i64).collect();
             let top_x_tensor = Tensor::from_vec(top_x_i64, n_tokens, &self.device)?;
-            final_hidden_states = final_hidden_states.index_add(&top_x_tensor, &current_hidden_states.to_dtype(hidden_states.dtype())?, 0)?;
+            final_hidden_states = final_hidden_states.index_add(
+                &top_x_tensor,
+                &current_hidden_states.to_dtype(hidden_states.dtype())?,
+                0,
+            )?;
             self.post_comp(expert_idx)?;
         }
 
@@ -236,15 +270,23 @@ impl Qwen2MoeSparseMoeBlock {
                 let row_idx = Tensor::from_vec(top_x_u32, n_tokens, routing_weights.device())?;
                 let idx_u32: Vec<u32> = idx.iter().map(|&x| x as u32).collect();
                 let col_idx = Tensor::from_vec(idx_u32, (n_tokens, 1), routing_weights.device())?;
-                let weights = routing_weights.index_select(&row_idx, 0)?.gather(&col_idx, 1)?;
+                let weights = routing_weights
+                    .index_select(&row_idx, 0)?
+                    .gather(&col_idx, 1)?;
 
                 let expert_out = expert_layer.forward(&current_state)?;
-                let weights = weights.to_dtype(expert_out.dtype())?.broadcast_as(expert_out.shape())?;
+                let weights = weights
+                    .to_dtype(expert_out.dtype())?
+                    .broadcast_as(expert_out.shape())?;
                 let current_hidden_states = (expert_out * weights)?;
 
                 let top_x_i64: Vec<i64> = top_x.iter().map(|&x| x as i64).collect();
                 let top_x_tensor = Tensor::from_vec(top_x_i64, n_tokens, &self.device)?;
-                final_hidden_states = final_hidden_states.index_add(&top_x_tensor, &current_hidden_states.to_dtype(hidden_states.dtype())?, 0)?;
+                final_hidden_states = final_hidden_states.index_add(
+                    &top_x_tensor,
+                    &current_hidden_states.to_dtype(hidden_states.dtype())?,
+                    0,
+                )?;
                 self.post_comp(expert_idx)?;
             }
         }
@@ -260,7 +302,6 @@ impl Qwen2MoeSparseMoeBlock {
     }
 }
 
-
 pub enum Idx {
     Single(usize),
     Multiple(Vec<usize>),
@@ -270,12 +311,12 @@ pub fn topk_routing(routing_logits: &Tensor, k: usize, norm: bool) -> Result<(Te
     // step 1: softmax to get routing_weights
     //let routing_weights = candle_nn::ops::softmax_last_dim(routing_logits)?;
     let routing_weights = candle_nn::ops::softmax(&routing_logits, 1)?.to_dtype(DType::F32)?;
-    
+
     // step 2: get top-k expert indices for each token
     let topk_indices = routing_weights
         .arg_sort_last_dim(false)? // descending sort
-        .narrow(D::Minus1, 0, k)?  // take top-k
-        .contiguous()?;           // ensure memory layout
+        .narrow(D::Minus1, 0, k)? // take top-k
+        .contiguous()?; // ensure memory layout
 
     // step 3: gather routing weights for top-k experts
     let topk_weights = routing_weights.gather(&topk_indices, D::Minus1)?;

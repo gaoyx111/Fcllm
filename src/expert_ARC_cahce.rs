@@ -100,8 +100,8 @@ impl ARC_Cache {
     }
 
     fn replace(&mut self, expert_id: usize) -> Option<usize> {
-        if !self.t1.is_empty() &&
-            ((self.b2.contains(&expert_id) && self.t1.len() > self.p) || self.t1.len() > self.p)
+        if !self.t1.is_empty()
+            && ((self.b2.contains(&expert_id) && self.t1.len() > self.p) || self.t1.len() > self.p)
         {
             let id = self.t1.pop_front().unwrap();
             self.b1.push_back(id);

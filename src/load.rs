@@ -1,10 +1,14 @@
+use candle_core::safetensors::load_buffer;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::Linear;
 use std::collections::HashMap;
-use candle_core::safetensors::load_buffer;
-use std::path::{PathBuf, Path};
+use std::path::{Path, PathBuf};
 
-pub fn load_tensor_from_file(path: &str, key: &str, device: &Device) -> candle_core::Result<Tensor> {
+pub fn load_tensor_from_file(
+    path: &str,
+    key: &str,
+    device: &Device,
+) -> candle_core::Result<Tensor> {
     let data = std::fs::read(path)?; // 读取 .safetensors 文件为字节流
     let tensors: HashMap<String, Tensor> = load_buffer(&data, device)?;
     tensors
@@ -27,7 +31,6 @@ pub fn load_linear_from_files(
     //println!("weight: {:?}, bias: {:?}", weight, bias);
     Ok(Linear::new(weight, bias))
 }
-
 
 pub struct ExpertTensorLoader {
     pub root: PathBuf,
@@ -120,9 +123,8 @@ impl ExpertTensorLoader {
         //     .get(actual_key)
         //     .cloned()
         //     .ok_or_else(|| candle_core::Error::Msg(format!("Key '{}' not found in {:?}", actual_key, path)))
-        tensors
-            .get(key)
-            .cloned()
-            .ok_or_else(|| candle_core::Error::Msg(format!("Key '{}' not found in {:?}", key, path)))
+        tensors.get(key).cloned().ok_or_else(|| {
+            candle_core::Error::Msg(format!("Key '{}' not found in {:?}", key, path))
+        })
     }
 }

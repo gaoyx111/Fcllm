@@ -14,7 +14,13 @@ pub struct Qwen2MoeRotaryEmbedding {
 }
 
 impl Qwen2MoeRotaryEmbedding {
-    pub fn new(dim: usize, max_position_embeddings: usize, base: f32, dtype: DType, device: &Device) -> Result<Self> {
+    pub fn new(
+        dim: usize,
+        max_position_embeddings: usize,
+        base: f32,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Self> {
         // Compute inv_freq: shape [dim / 2]
         let inv_freq_data: Vec<f32> = (0..dim)
             .step_by(2)
@@ -67,36 +73,60 @@ impl Qwen2MoeRotaryEmbedding {
             *cached_len = seq_len;
         }
 
-        let cos = self.cos_cached.lock().unwrap().as_ref().unwrap()
+        let cos = self
+            .cos_cached
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
             .narrow(0, 0, seq_len)?
             .to_dtype(self.dtype)?
             .to_device(&self.device)?;
-        let sin = self.sin_cached.lock().unwrap().as_ref().unwrap()
+        let sin = self
+            .sin_cached
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
             .narrow(0, 0, seq_len)?
             .to_dtype(self.dtype)?
             .to_device(&self.device)?;
         Ok((cos, sin))
     }
 
-    pub fn forward(&self, seq_len: usize, dtype: DType, device: &Device) -> Result<(Tensor, Tensor)> {
+    pub fn forward(
+        &self,
+        seq_len: usize,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<(Tensor, Tensor)> {
         let mut cached_len = self.max_seq_len_cached.lock().unwrap();
         if seq_len > *cached_len {
             self.set_cos_sin_cache(seq_len)?; // 默认以 self.dtype, self.device 构造缓存
             *cached_len = seq_len;
         }
 
-        let cos = self.cos_cached.lock().unwrap().as_ref().unwrap()
+        let cos = self
+            .cos_cached
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
             .narrow(0, 0, seq_len)?
             .to_dtype(dtype)?
             .to_device(device)?;
-        let sin = self.sin_cached.lock().unwrap().as_ref().unwrap()
+        let sin = self
+            .sin_cached
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
             .narrow(0, 0, seq_len)?
             .to_dtype(dtype)?
             .to_device(device)?;
         Ok((cos, sin))
     }
 }
-
 
 pub fn rotate_half(x: &Tensor) -> Result<Tensor> {
     let dim = x.dims().last().copied().unwrap();
@@ -106,12 +136,12 @@ pub fn rotate_half(x: &Tensor) -> Result<Tensor> {
 }
 
 pub fn apply_rotary_pos_emb(
-    q: &Tensor,                // [bsz, n_heads, seq_len, head_dim]
-    k: &Tensor,                // [bsz, n_kv_heads, seq_len, head_dim]
-    cos: &Tensor,              // [max_seq_len, head_dim]
-    sin: &Tensor,              // [max_seq_len, head_dim]
-    position_ids: &Tensor,     // [bsz, seq_len]
-    unsqueeze_dim: usize,      // 1 => insert dim at position 1 for head broadcast
+    q: &Tensor,            // [bsz, n_heads, seq_len, head_dim]
+    k: &Tensor,            // [bsz, n_kv_heads, seq_len, head_dim]
+    cos: &Tensor,          // [max_seq_len, head_dim]
+    sin: &Tensor,          // [max_seq_len, head_dim]
+    position_ids: &Tensor, // [bsz, seq_len]
+    unsqueeze_dim: usize,  // 1 => insert dim at position 1 for head broadcast
 ) -> Result<(Tensor, Tensor)> {
     // cos[position_ids] => [bsz, seq_len, head_dim], then unsqueeze(1) => [bsz, 1, seq_len, head_dim]
     let cos_pos = index_positioned_tensor(cos, position_ids, unsqueeze_dim)?;
@@ -120,8 +150,12 @@ pub fn apply_rotary_pos_emb(
     let q_rot = rotate_half(q)?;
     let k_rot = rotate_half(k)?;
 
-    let q_embed = q.mul(&cos_pos.broadcast_as(q.shape())?)?.add(&q_rot.mul(&sin_pos.broadcast_as(q.shape())?)?)?;
-    let k_embed = k.mul(&cos_pos.broadcast_as(k.shape())?)?.add(&k_rot.mul(&sin_pos.broadcast_as(k.shape())?)?)?;
+    let q_embed = q
+        .mul(&cos_pos.broadcast_as(q.shape())?)?
+        .add(&q_rot.mul(&sin_pos.broadcast_as(q.shape())?)?)?;
+    let k_embed = k
+        .mul(&cos_pos.broadcast_as(k.shape())?)?
+        .add(&k_rot.mul(&sin_pos.broadcast_as(k.shape())?)?)?;
 
     Ok((q_embed, k_embed))
 }
@@ -163,10 +197,9 @@ pub fn repeat_kv(hidden_states: &Tensor, n_rep: usize) -> Result<Tensor> {
 //     gathered.unsqueeze(unsqueeze_dim)
 // }
 
-
 pub fn index_positioned_tensor(
-    base: &Tensor,             // [max_seq_len, dim]
-    position_ids: &Tensor,     // [bsz, seq_len]
+    base: &Tensor,         // [max_seq_len, dim]
+    position_ids: &Tensor, // [bsz, seq_len]
     unsqueeze_dim: usize,
 ) -> Result<Tensor> {
     let (bsz, seq_len) = position_ids.dims2()?;
