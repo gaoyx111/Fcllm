@@ -131,7 +131,7 @@ fn argmax_score(scores: &[f32]) -> Option<u32> {
     best.map(|(idx, _)| idx as u32)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Qwen2MoeForCausalLM {
     pub config: Qwen2MoeConfig,
     pub device: Device,

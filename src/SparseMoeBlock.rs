@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Qwen2MoeSparseMoeBlock {
     pub num_experts: usize,
     pub top_k: usize,

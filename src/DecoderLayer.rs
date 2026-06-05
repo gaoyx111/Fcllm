@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Qwen2MoeDecoderLayer {
     pub config: Qwen2MoeConfig,
     pub hidden_size: usize,

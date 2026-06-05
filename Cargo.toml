@@ -14,6 +14,7 @@ tokenizers = "0.21.1"
 nvml-wrapper = "0.11.0"
 tqdm = "0.7.0"
 clap = { version = "4.5.39", features = ["derive"] }
+time = { version = "0.3.44", features = ["local-offset"] }
 
 # HTTP 服务器相关依赖
 axum = { version = "0.7", features = ["json"] }

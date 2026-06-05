@@ -13,6 +13,36 @@ pub struct Qwen2MoeRotaryEmbedding {
     pub max_seq_len_cached: Mutex<usize>,
 }
 
+impl Clone for Qwen2MoeRotaryEmbedding {
+    fn clone(&self) -> Self {
+        Self {
+            dim: self.dim,
+            base: self.base,
+            device: self.device.clone(),
+            dtype: self.dtype,
+            inv_freq: self.inv_freq.clone(),
+            sin_cached: Mutex::new(
+                self.sin_cached
+                    .lock()
+                    .ok()
+                    .and_then(|cached| cached.clone()),
+            ),
+            cos_cached: Mutex::new(
+                self.cos_cached
+                    .lock()
+                    .ok()
+                    .and_then(|cached| cached.clone()),
+            ),
+            max_seq_len_cached: Mutex::new(
+                self.max_seq_len_cached
+                    .lock()
+                    .map(|value| *value)
+                    .unwrap_or_default(),
+            ),
+        }
+    }
+}
+
 impl Qwen2MoeRotaryEmbedding {
     pub fn new(
         dim: usize,

@@ -264,7 +264,7 @@ pub const GB: usize = 1 << 30; // 1024 * 1024 * 1024
 pub const T: f64 = 1e12; // 万亿级常量，用于浮点计算
 
 // 获取指定 cuda 设备编号的显存使用和总显存（单位 MB）
-fn get_gpu_memory_usage(device_id: u32) -> Result<(usize, usize)> {
+pub fn get_gpu_memory_usage(device_id: u32) -> Result<(usize, usize)> {
     let nvml =
         Nvml::init().map_err(|e| candle_core::Error::Msg(format!("NVML init error: {e}")))?;
     let device = nvml

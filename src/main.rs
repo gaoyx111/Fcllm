@@ -53,12 +53,26 @@ fn main() -> Result<()> {
         // 服务器 + 桌面窗口模式（默认行为）
         StartMode::Desktop => {
             println!("正在加载模型，请稍候...");
+            let gpu_before = server::gpu_memory_usage_for_device_spec(&args.device);
+            let system_before = server::system_memory_usage_mb();
             let mut model = Qwen2MoeForCausalLM::new(args.clone())?;
             model.init_weights()?;
+            let gpu_after = server::gpu_memory_usage_for_device_spec(&args.device);
+            let system_after = server::system_memory_usage_mb();
+            let estimated_worker_gpu_mb =
+                server::estimate_worker_gpu_memory_mb(gpu_before, gpu_after);
+            let estimated_worker_system_mb =
+                server::estimate_worker_system_memory_mb(system_before, system_after);
             let tokenizer = Arc::new(load_tokenizer(&args)?);
             println!("模型加载完成！正在启动桌面窗口...");
             // launch_desktop_app 返回 !（永不返回），会强制关闭进程
-            launch_desktop_app(args, model, tokenizer)
+            launch_desktop_app(
+                args,
+                model,
+                tokenizer,
+                estimated_worker_gpu_mb,
+                estimated_worker_system_mb,
+            )
         }
         // 服务器 + 无界面模式（--no-ui）
         StartMode::HeadlessServer => run_server_headless(args),
@@ -115,7 +129,13 @@ fn run_cli(args: Args) -> Result<()> {
 
 /// 启动桌面 App（原生 WebView 窗口）
 /// 此函数永不返回（tao event loop 发散）
-fn launch_desktop_app(args: Args, model: Qwen2MoeForCausalLM, tokenizer: Arc<Tokenizer>) -> ! {
+fn launch_desktop_app(
+    args: Args,
+    model: Qwen2MoeForCausalLM,
+    tokenizer: Arc<Tokenizer>,
+    estimated_worker_gpu_mb: Option<usize>,
+    estimated_worker_system_mb: Option<usize>,
+) -> ! {
     use tao::{
         dpi::LogicalSize,
         event::{Event, WindowEvent},
@@ -126,18 +146,19 @@ fn launch_desktop_app(args: Args, model: Qwen2MoeForCausalLM, tokenizer: Arc<Tok
 
     let port = args.port;
 
-    // 1. 创建推理请求通道
-    let (req_tx, req_rx) = tokio::sync::mpsc::channel::<server::InferRequest>(4);
+    // 1. 创建自动推理 worker 池（保留原启动方式，不需要用户指定并发参数）
+    let req_tx = server::start_auto_model_worker_pool(
+        model,
+        args.clone(),
+        tokenizer,
+        estimated_worker_gpu_mb,
+        estimated_worker_system_mb,
+    );
 
     // 2. HTTP 服务器就绪信号通道
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<u16>();
 
-    // 3. 模型推理工作线程（model 需要 Send，candle Tensor 实现了 unsafe Send）
-    std::thread::spawn(move || {
-        server::model_worker_loop(model, tokenizer, req_rx);
-    });
-
-    // 4. HTTP 服务器线程
+    // 3. HTTP 服务器线程
     let frontend_dir = resolve_frontend_dir(args.frontend_dir.clone());
     std::thread::spawn(move || {
         tokio::runtime::Builder::new_multi_thread()
@@ -159,7 +180,7 @@ fn launch_desktop_app(args: Args, model: Qwen2MoeForCausalLM, tokenizer: Arc<Tok
             });
     });
 
-    // 5. 等待 HTTP 服务器绑定完成
+    // 4. 等待 HTTP 服务器绑定完成
     let bound_port = ready_rx.recv().expect("HTTP 服务器启动失败");
     let url = format!("http://localhost:{bound_port}");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -167,7 +188,7 @@ fn launch_desktop_app(args: Args, model: Qwen2MoeForCausalLM, tokenizer: Arc<Tok
     println!("  也可以浏览器直接访问：{url}");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    // 6. 在主线程创建 tao 窗口 + wry WebView
+    // 5. 在主线程创建 tao 窗口 + wry WebView
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("Fcllm Chat")
@@ -180,7 +201,7 @@ fn launch_desktop_app(args: Args, model: Qwen2MoeForCausalLM, tokenizer: Arc<Tok
         .build(&window)
         .expect("无法创建 WebView（请确认 Microsoft Edge WebView2 已安装）");
 
-    // 7. 运行事件循环（此处永不返回）
+    // 6. 运行事件循环（此处永不返回）
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         if let Event::WindowEvent {
@@ -200,13 +221,26 @@ fn launch_desktop_app(args: Args, model: Qwen2MoeForCausalLM, tokenizer: Arc<Tok
 
 fn run_server_headless(args: Args) -> Result<()> {
     println!("正在加载模型权重，请稍候...");
+    let gpu_before = server::gpu_memory_usage_for_device_spec(&args.device);
+    let system_before = server::system_memory_usage_mb();
     let mut model = Qwen2MoeForCausalLM::new(args.clone())?;
     model.init_weights()?;
+    let gpu_after = server::gpu_memory_usage_for_device_spec(&args.device);
+    let system_after = server::system_memory_usage_mb();
+    let estimated_worker_gpu_mb = server::estimate_worker_gpu_memory_mb(gpu_before, gpu_after);
+    let estimated_worker_system_mb =
+        server::estimate_worker_system_memory_mb(system_before, system_after);
     println!("模型加载完成！");
 
     let tokenizer = Arc::new(load_tokenizer(&args)?);
 
-    let (req_tx, req_rx) = tokio::sync::mpsc::channel::<server::InferRequest>(4);
+    let req_tx = server::start_auto_model_worker_pool(
+        model,
+        args.clone(),
+        tokenizer,
+        estimated_worker_gpu_mb,
+        estimated_worker_system_mb,
+    );
 
     let port = args.port;
     let frontend_dir = resolve_frontend_dir(args.frontend_dir.clone());
@@ -236,9 +270,10 @@ fn run_server_headless(args: Args) -> Result<()> {
             });
     });
 
-    // 主线程运行模型推理（无需 Send）
-    server::model_worker_loop(model, tokenizer, req_rx);
-    Ok(())
+    // 主线程保持进程存活；模型推理由自动 worker 池管理。
+    loop {
+        std::thread::park();
+    }
 }
 
 // ─────────────────────────────────────────────────────────────

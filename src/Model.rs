@@ -8,7 +8,7 @@ use candle_core::{Device, Error, Result, Tensor};
 use std::path::PathBuf;
 use tqdm::tqdm;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Qwen2MoeModel {
     pub config: Qwen2MoeConfig,
     pub padding_idx: usize,

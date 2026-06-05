@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ARC_Cache {
     max_size: usize,
     p: usize, // 自适应参数，用于调整T1和T2的大小

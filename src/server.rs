@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 /// HTTP 服务器模块
 /// 提供与 chatgpt-web 及 OpenAI 兼容的接口，支持流式输出
 use std::convert::Infallible;
@@ -24,17 +24,29 @@ use tower_http::services::ServeDir;
 use uuid::Uuid;
 
 use candle_core::Tensor;
+use time::{OffsetDateTime, Weekday};
 use tokenizers::Tokenizer;
 
 use crate::ForCausalLM::Qwen2MoeForCausalLM;
+use crate::args::Args;
+use crate::utils::get_gpu_memory_usage;
 
 const MAX_ID_ACC: usize = 8;
 const MAX_HISTORY_MESSAGES: usize = 8;
 const MAX_HISTORY_CHARS: usize = 1200;
 const MAX_HISTORY_MESSAGE_CHARS: usize = 420;
-const MAX_GUARDED_GENERATION_ATTEMPTS: usize = 2;
-const CHAT_PROCESS_MAX_TOKENS: usize = 256;
+const MAX_GUARDED_GENERATION_ATTEMPTS: usize = 3;
+const CHAT_PROCESS_MAX_TOKENS: usize = 1024;
+const MAX_REQUEST_MAX_TOKENS: usize = 2048;
 const CHAT_PROCESS_HEARTBEAT_SECS: u64 = 15;
+const MODEL_REQUEST_QUEUE_CAPACITY: usize = 64;
+const AUTO_MIN_WORKER_GPU_MB: usize = 4096;
+const MIN_RELIABLE_GPU_WORKER_DELTA_MB: usize = 512;
+const AUTO_MIN_WORKER_SYSTEM_MB: usize = 2048;
+const MIN_RELIABLE_SYSTEM_WORKER_DELTA_MB: usize = 512;
+const SHARED_WEIGHT_WORKER_MIN_FREE_GPU_MB: usize = 384;
+const SHARED_WEIGHT_WORKER_MIN_FREE_SYSTEM_MB: usize = 1024;
+const MAX_AUTO_MODEL_WORKERS: usize = 8;
 
 const DIRECT_TEXT_STOPS: &[&str] = &[
     "<|im_end|>",
@@ -110,6 +122,7 @@ const MATH_PARSE_ERROR_STOPS: &[&str] = &[
     "KaTeX parse error",
     "Got function '$' with no arguments",
 ];
+const SYMBOL_ARTIFACT_STOPS: &[&str] = &["$k", "$K"];
 
 const WRONG_STARDEW_TITLE_STOPS: &[&str] = &[
     "星露山谷新生传说",
@@ -128,6 +141,67 @@ const WRONG_STARDEW_TITLE_STOPS: &[&str] = &[
 struct TextStop {
     pos: usize,
     marker: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemporalAnswerGuard {
+    Hold,
+    StopWrongDate,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuntimeDateInfo {
+    year: i32,
+    month: u8,
+    day: u8,
+    weekday: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextDebugMessage {
+    role: String,
+    char_count: usize,
+    reason: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextDebugFilteredMessage {
+    role: String,
+    char_count: usize,
+    reason: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextDebugEvent {
+    conversation_id: String,
+    user_chars: usize,
+    history_messages: usize,
+    cleaned_history_messages: usize,
+    prompt_messages: usize,
+    prompt_chars: usize,
+    prior_context_triggered: bool,
+    answer_without_prior_history: bool,
+    discarded_polluted_history: bool,
+    selected: Vec<ContextDebugMessage>,
+    filtered: Vec<ContextDebugFilteredMessage>,
+}
+
+impl ContextDebugEvent {
+    fn new(conversation_id: &str, user_prompt: &str, history: &[ChatMessage]) -> Self {
+        Self {
+            conversation_id: conversation_id.to_string(),
+            user_chars: user_prompt.chars().count(),
+            history_messages: history.len(),
+            cleaned_history_messages: 0,
+            prompt_messages: 0,
+            prompt_chars: 0,
+            prior_context_triggered: false,
+            answer_without_prior_history: false,
+            discarded_polluted_history: false,
+            selected: Vec::new(),
+            filtered: Vec::new(),
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -208,6 +282,7 @@ pub struct ChatProcessRequest {
     pub system_message: Option<String>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
+    pub max_tokens: Option<usize>,
 }
 
 /// chatgpt-web SSE 推送格式
@@ -258,6 +333,25 @@ pub struct InferRequest {
 pub type ModelReqSender = mpsc::Sender<InferRequest>;
 type ConversationStore = Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>;
 
+struct ModelWorkerHandle {
+    id: usize,
+    req_tx: mpsc::Sender<InferRequest>,
+    busy: bool,
+}
+
+enum WorkerPoolEvent {
+    Idle(usize),
+    Exited(usize),
+}
+
+struct AutoWorkerPoolConfig {
+    args: Args,
+    tokenizer: Arc<Tokenizer>,
+    prototype_model: Arc<Qwen2MoeForCausalLM>,
+    estimated_worker_gpu_mb: Option<usize>,
+    estimated_worker_system_mb: Option<usize>,
+}
+
 /// axum 共享状态
 #[derive(Clone)]
 pub struct AppState {
@@ -272,6 +366,468 @@ impl AppState {
             conversations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+}
+
+pub fn model_request_queue_capacity() -> usize {
+    MODEL_REQUEST_QUEUE_CAPACITY
+}
+
+pub fn gpu_memory_usage_for_device_spec(device: &str) -> Option<(usize, usize)> {
+    let device_id = cuda_device_index(device)?;
+    get_gpu_memory_usage(device_id).ok()
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct MemoryStatusEx {
+    dw_length: u32,
+    dw_memory_load: u32,
+    ull_total_phys: u64,
+    ull_avail_phys: u64,
+    ull_total_page_file: u64,
+    ull_avail_page_file: u64,
+    ull_total_virtual: u64,
+    ull_avail_virtual: u64,
+    ull_avail_extended_virtual: u64,
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+pub fn system_memory_usage_mb() -> Option<(usize, usize)> {
+    let mut status = MemoryStatusEx {
+        dw_length: std::mem::size_of::<MemoryStatusEx>() as u32,
+        dw_memory_load: 0,
+        ull_total_phys: 0,
+        ull_avail_phys: 0,
+        ull_total_page_file: 0,
+        ull_avail_page_file: 0,
+        ull_total_virtual: 0,
+        ull_avail_virtual: 0,
+        ull_avail_extended_virtual: 0,
+    };
+
+    let ok = unsafe { GlobalMemoryStatusEx(&mut status as *mut MemoryStatusEx) };
+    if ok == 0 || status.ull_total_phys == 0 {
+        return None;
+    }
+
+    let total_mb = bytes_to_mb(status.ull_total_phys);
+    let avail_mb = bytes_to_mb(status.ull_avail_phys);
+    Some((total_mb.saturating_sub(avail_mb), total_mb))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn system_memory_usage_mb() -> Option<(usize, usize)> {
+    None
+}
+
+fn bytes_to_mb(bytes: u64) -> usize {
+    (bytes / 1024 / 1024) as usize
+}
+
+pub fn estimate_worker_gpu_memory_mb(
+    before: Option<(usize, usize)>,
+    after: Option<(usize, usize)>,
+) -> Option<usize> {
+    let ((used_before, _), (used_after, _)) = (before?, after?);
+    let delta = used_after.checked_sub(used_before)?;
+    if delta < MIN_RELIABLE_GPU_WORKER_DELTA_MB {
+        return None;
+    }
+    Some(delta.max(AUTO_MIN_WORKER_GPU_MB))
+}
+
+pub fn estimate_worker_system_memory_mb(
+    before: Option<(usize, usize)>,
+    after: Option<(usize, usize)>,
+) -> Option<usize> {
+    let ((used_before, _), (used_after, _)) = (before?, after?);
+    let delta = used_after.checked_sub(used_before)?;
+    if delta < MIN_RELIABLE_SYSTEM_WORKER_DELTA_MB {
+        return None;
+    }
+    Some(delta.max(AUTO_MIN_WORKER_SYSTEM_MB))
+}
+
+pub fn start_auto_model_worker_pool(
+    initial_model: Qwen2MoeForCausalLM,
+    args: Args,
+    tokenizer: Arc<Tokenizer>,
+    estimated_worker_gpu_mb: Option<usize>,
+    estimated_worker_system_mb: Option<usize>,
+) -> ModelReqSender {
+    let (pool_tx, pool_rx) = mpsc::channel::<InferRequest>(MODEL_REQUEST_QUEUE_CAPACITY);
+    let prototype_model = Arc::new(initial_model.clone());
+    let config = AutoWorkerPoolConfig {
+        args,
+        tokenizer,
+        prototype_model,
+        estimated_worker_gpu_mb,
+        estimated_worker_system_mb,
+    };
+
+    std::thread::spawn(move || {
+        auto_model_worker_pool_loop(initial_model, pool_rx, config);
+    });
+
+    pool_tx
+}
+
+fn auto_model_worker_pool_loop(
+    initial_model: Qwen2MoeForCausalLM,
+    mut pool_rx: mpsc::Receiver<InferRequest>,
+    config: AutoWorkerPoolConfig,
+) {
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<WorkerPoolEvent>();
+    let mut workers = Vec::new();
+    let mut pending = VecDeque::new();
+    let mut next_worker_id = 0usize;
+    let mut auto_spawn_disabled = false;
+
+    workers.push(spawn_model_worker(
+        next_worker_id,
+        initial_model,
+        config.tokenizer.clone(),
+        done_tx.clone(),
+    ));
+    next_worker_id += 1;
+
+    eprintln!(
+        "[worker-pool] 自动模型 worker 池启动：初始 worker=1，队列容量={MODEL_REQUEST_QUEUE_CAPACITY}"
+    );
+    eprintln!(
+        "[worker-pool] worker 资源估算：gpu_mb={:?} system_mb={:?} hard_cap={}",
+        config.estimated_worker_gpu_mb,
+        config.estimated_worker_system_mb,
+        auto_worker_hard_cap(&config)
+    );
+
+    loop {
+        mark_completed_workers(&mut workers, &done_rx);
+        dispatch_pending_requests(
+            &mut pending,
+            &mut workers,
+            &config,
+            &done_tx,
+            &mut next_worker_id,
+            &mut auto_spawn_disabled,
+        );
+
+        if pending.is_empty() {
+            match pool_rx.blocking_recv() {
+                Some(req) => pending.push_back(req),
+                None => break,
+            }
+            continue;
+        }
+
+        match done_rx.recv() {
+            Ok(event) => handle_worker_pool_event(&mut workers, event),
+            Err(_) => break,
+        }
+    }
+
+    eprintln!("[worker-pool] 请求通道已关闭，worker 池退出");
+}
+
+fn mark_completed_workers(
+    workers: &mut Vec<ModelWorkerHandle>,
+    done_rx: &std::sync::mpsc::Receiver<WorkerPoolEvent>,
+) {
+    while let Ok(event) = done_rx.try_recv() {
+        handle_worker_pool_event(workers, event);
+    }
+}
+
+fn handle_worker_pool_event(workers: &mut Vec<ModelWorkerHandle>, event: WorkerPoolEvent) {
+    match event {
+        WorkerPoolEvent::Idle(worker_id) => {
+            if let Some(worker) = workers.iter_mut().find(|worker| worker.id == worker_id) {
+                worker.busy = false;
+            }
+        }
+        WorkerPoolEvent::Exited(worker_id) => {
+            if let Some(pos) = workers.iter().position(|worker| worker.id == worker_id) {
+                workers.remove(pos);
+                eprintln!("[worker-pool] worker {worker_id} 已退出，已从调度池移除");
+            }
+        }
+    }
+}
+
+fn dispatch_pending_requests(
+    pending: &mut VecDeque<InferRequest>,
+    workers: &mut Vec<ModelWorkerHandle>,
+    config: &AutoWorkerPoolConfig,
+    done_tx: &std::sync::mpsc::Sender<WorkerPoolEvent>,
+    next_worker_id: &mut usize,
+    auto_spawn_disabled: &mut bool,
+) {
+    while let Some(req) = pending.pop_front() {
+        if req.token_tx.is_closed() {
+            eprintln!("[worker-pool] 客户端已断开，丢弃排队请求");
+            continue;
+        }
+
+        if let Some(worker_pos) = workers.iter().position(|worker| !worker.busy) {
+            match dispatch_to_worker(&mut workers[worker_pos], req) {
+                Ok(()) => continue,
+                Err(err) => {
+                    let failed_worker = workers.remove(worker_pos);
+                    eprintln!(
+                        "[worker-pool] worker {} 通道已关闭，保留请求并移除该 worker",
+                        failed_worker.id
+                    );
+                    pending.push_front(err.0);
+                }
+            }
+            if workers.is_empty() {
+                continue;
+            }
+            continue;
+        }
+
+        if workers.is_empty() {
+            match spawn_replacement_worker(config, done_tx.clone(), *next_worker_id) {
+                Some(mut worker) => {
+                    *next_worker_id += 1;
+                    let _ = dispatch_to_worker(&mut worker, req);
+                    workers.push(worker);
+                    continue;
+                }
+                None => {
+                    *auto_spawn_disabled = true;
+                    finish_unserved_request(req);
+                    continue;
+                }
+            }
+        }
+
+        if !*auto_spawn_disabled && can_spawn_additional_worker(config, workers.len()) {
+            match spawn_additional_worker(config, done_tx.clone(), *next_worker_id) {
+                Some(mut worker) => {
+                    *next_worker_id += 1;
+                    let _ = dispatch_to_worker(&mut worker, req);
+                    workers.push(worker);
+                    continue;
+                }
+                None => {
+                    *auto_spawn_disabled = true;
+                }
+            }
+        }
+
+        pending.push_front(req);
+        break;
+    }
+}
+
+fn dispatch_to_worker(
+    worker: &mut ModelWorkerHandle,
+    req: InferRequest,
+) -> Result<(), mpsc::error::SendError<InferRequest>> {
+    worker.busy = true;
+    worker.req_tx.blocking_send(req).map_err(|err| {
+        worker.busy = false;
+        eprintln!("[worker-pool] worker {} 已退出，无法分发请求", worker.id);
+        err
+    })
+}
+
+fn spawn_model_worker(
+    worker_id: usize,
+    model: Qwen2MoeForCausalLM,
+    tokenizer: Arc<Tokenizer>,
+    done_tx: std::sync::mpsc::Sender<WorkerPoolEvent>,
+) -> ModelWorkerHandle {
+    let (req_tx, req_rx) = mpsc::channel::<InferRequest>(1);
+    let exit_tx = done_tx.clone();
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            model_worker_loop_with_notify(model, tokenizer, req_rx, worker_id, done_tx);
+        }));
+        if result.is_err() {
+            eprintln!("[worker-pool] worker {worker_id} 发生 panic，准备从调度池移除");
+        }
+        let _ = exit_tx.send(WorkerPoolEvent::Exited(worker_id));
+    });
+
+    ModelWorkerHandle {
+        id: worker_id,
+        req_tx,
+        busy: false,
+    }
+}
+
+fn spawn_additional_worker(
+    config: &AutoWorkerPoolConfig,
+    done_tx: std::sync::mpsc::Sender<WorkerPoolEvent>,
+    worker_id: usize,
+) -> Option<ModelWorkerHandle> {
+    eprintln!(
+        "[worker-pool] 资源允许，正在克隆共享权重的第 {} 个模型 worker",
+        worker_id + 1
+    );
+    load_model_worker(config, done_tx, worker_id)
+}
+
+fn spawn_replacement_worker(
+    config: &AutoWorkerPoolConfig,
+    done_tx: std::sync::mpsc::Sender<WorkerPoolEvent>,
+    worker_id: usize,
+) -> Option<ModelWorkerHandle> {
+    eprintln!(
+        "[worker-pool] 没有可用模型 worker，尝试从共享权重 prototype 重建 worker {worker_id}"
+    );
+    load_model_worker(config, done_tx, worker_id)
+}
+
+fn load_model_worker(
+    config: &AutoWorkerPoolConfig,
+    done_tx: std::sync::mpsc::Sender<WorkerPoolEvent>,
+    worker_id: usize,
+) -> Option<ModelWorkerHandle> {
+    let model_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        candle_core::Result::Ok((*config.prototype_model).clone())
+    }));
+
+    let model = match model_result {
+        Ok(Ok(model)) => model,
+        Ok(Err(err)) => {
+            eprintln!("[worker-pool] 加载模型 worker 失败: {err}");
+            return None;
+        }
+        Err(_) => {
+            eprintln!("[worker-pool] 加载模型 worker 时发生 panic");
+            return None;
+        }
+    };
+
+    Some(spawn_model_worker(
+        worker_id,
+        model,
+        config.tokenizer.clone(),
+        done_tx,
+    ))
+}
+
+fn finish_unserved_request(req: InferRequest) {
+    set_finish_reason(&req.finish_reason, "stop");
+    let _ = req.token_tx.blocking_send(None);
+}
+
+fn can_spawn_additional_worker(config: &AutoWorkerPoolConfig, current_workers: usize) -> bool {
+    if current_workers >= auto_worker_hard_cap(config) {
+        return false;
+    }
+
+    match (
+        config.estimated_worker_gpu_mb,
+        config.estimated_worker_system_mb,
+    ) {
+        (Some(_), Some(_)) => {
+            let gpu_allowed =
+                can_spawn_shared_weight_worker_with_gpu_memory(config, current_workers);
+            let system_allowed =
+                can_spawn_shared_weight_worker_with_system_memory(config, current_workers);
+            let allowed = gpu_allowed && system_allowed;
+            eprintln!(
+                "[worker-pool] 共享权重并发综合判断：需要同时满足 GPU 与系统内存运行余量，spawn={allowed}"
+            );
+            allowed
+        }
+        (Some(_), None) => can_spawn_shared_weight_worker_with_gpu_memory(config, current_workers),
+        (None, Some(_)) => {
+            can_spawn_shared_weight_worker_with_system_memory(config, current_workers)
+        }
+        (None, None) => {
+            eprintln!("[worker-pool] 自动并发检查：未获得可靠 worker 资源估算，保持排队");
+            false
+        }
+    }
+}
+
+fn can_spawn_shared_weight_worker_with_gpu_memory(
+    config: &AutoWorkerPoolConfig,
+    current_workers: usize,
+) -> bool {
+    if config.estimated_worker_gpu_mb.is_none() {
+        eprintln!("[worker-pool] GPU 并发检查：未获得可靠 worker 显存估算");
+        return false;
+    }
+
+    let Some((used_mb, total_mb)) = gpu_memory_usage_for_device_spec(&config.args.device) else {
+        eprintln!("[worker-pool] GPU 并发检查：无法读取显存，转用系统内存判断");
+        return false;
+    };
+    let free_mb = total_mb.saturating_sub(used_mb);
+    let allowed = free_mb > SHARED_WEIGHT_WORKER_MIN_FREE_GPU_MB;
+
+    eprintln!(
+        "[worker-pool] 共享权重 GPU 并发检查：workers={} free_gpu_mb={} min_free_gpu_mb={} spawn={}",
+        current_workers, free_mb, SHARED_WEIGHT_WORKER_MIN_FREE_GPU_MB, allowed
+    );
+
+    allowed
+}
+
+fn can_spawn_shared_weight_worker_with_system_memory(
+    config: &AutoWorkerPoolConfig,
+    current_workers: usize,
+) -> bool {
+    if config.estimated_worker_system_mb.is_none() {
+        eprintln!("[worker-pool] 系统内存并发检查：未获得可靠 worker 内存估算，保持排队");
+        return false;
+    }
+
+    let Some((used_mb, total_mb)) = system_memory_usage_mb() else {
+        eprintln!("[worker-pool] 系统内存并发检查：无法读取系统内存，保持排队");
+        return false;
+    };
+    let free_mb = total_mb.saturating_sub(used_mb);
+    let allowed = free_mb > SHARED_WEIGHT_WORKER_MIN_FREE_SYSTEM_MB;
+
+    eprintln!(
+        "[worker-pool] 共享权重系统内存并发检查：workers={} free_ram_mb={} min_free_ram_mb={} spawn={}",
+        current_workers, free_mb, SHARED_WEIGHT_WORKER_MIN_FREE_SYSTEM_MB, allowed
+    );
+
+    allowed
+}
+
+fn auto_worker_hard_cap(config: &AutoWorkerPoolConfig) -> usize {
+    let cpu_cap = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .clamp(1, MAX_AUTO_MODEL_WORKERS);
+
+    let device_cap = if config.estimated_worker_gpu_mb.is_some() {
+        match gpu_memory_usage_for_device_spec(&config.args.device) {
+            Some((_, total_mb)) if total_mb <= 12 * 1024 => 2,
+            Some((_, total_mb)) if total_mb <= 24 * 1024 => 4,
+            Some(_) => MAX_AUTO_MODEL_WORKERS,
+            None => 2,
+        }
+    } else {
+        cpu_cap
+    };
+
+    cpu_cap.min(device_cap).clamp(1, MAX_AUTO_MODEL_WORKERS)
+}
+
+fn cuda_device_index(device: &str) -> Option<u32> {
+    let normalized = device.trim().to_ascii_lowercase();
+    if normalized == "cuda" {
+        return Some(0);
+    }
+    normalized
+        .strip_prefix("cuda:")
+        .and_then(|index| index.parse::<u32>().ok())
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -378,7 +934,7 @@ async fn openai_handler(
 ) -> Response {
     let user_prompt = last_user_prompt(&req.messages);
     let prompt = messages_to_qwen_prompt(&req.messages);
-    let max_tokens = req.max_tokens.unwrap_or(512);
+    let max_tokens = normalized_max_tokens(req.max_tokens, CHAT_PROCESS_MAX_TOKENS);
 
     if req.stream {
         sse_response(state, prompt, user_prompt, max_tokens, false).await
@@ -418,15 +974,27 @@ async fn chatgpt_web_handler(
 
     let is_continuation = continuation_prompt.is_some();
     let prompt = if let Some(prompt) = continuation_prompt {
+        let mut debug = ContextDebugEvent::new(&conversation_id, &req.prompt, &prior_history);
+        debug.cleaned_history_messages = clean_history_messages_for_prompt(&prior_history).len();
+        debug.prompt_chars = prompt.chars().count();
+        debug.prompt_messages = debug.cleaned_history_messages;
+        log_context_debug(&debug);
         prompt
     } else {
-        build_chat_process_prompt(&prior_history, &req.prompt, system)
+        let (prompt, debug) = build_chat_process_prompt_with_debug(
+            &prior_history,
+            &req.prompt,
+            system,
+            &conversation_id,
+        );
+        log_context_debug(&debug);
+        prompt
     };
 
     ndjson_stream_response(
         state,
         prompt,
-        CHAT_PROCESS_MAX_TOKENS,
+        normalized_max_tokens(req.max_tokens, CHAT_PROCESS_MAX_TOKENS),
         conversation_id,
         req.prompt,
         prior_history,
@@ -754,6 +1322,8 @@ fn default_system_prompt() -> &'static str {
 
 fn effective_system_prompt(system: &str, alias: Option<&str>) -> String {
     let mut prompt = default_system_prompt().to_string();
+    prompt.push('\n');
+    prompt.push_str(&runtime_date_context());
     if let Some(alias) = alias.filter(|name| !name.trim().is_empty()) {
         prompt.push_str(&format!(
             "\n当前用户给你的称呼是「{}」。当用户询问你的名字或称呼时，必须回答这个称呼。",
@@ -769,6 +1339,52 @@ fn effective_system_prompt(system: &str, alias: Option<&str>) -> String {
     }
 
     prompt
+}
+
+fn runtime_date_context() -> String {
+    let date = runtime_date_info();
+    format!(
+        "当前系统日期是{:04}年{}月{}日，星期{}。如果用户询问今天、现在、明天或昨天的日期，只能依据这个系统日期推算；如果用户询问你的训练语料截止日期，你不能编造具体日期，应说明本地模型无法可靠得知。",
+        date.year, date.month, date.day, date.weekday
+    )
+}
+
+fn runtime_current_date_fact() -> String {
+    let date = runtime_date_info();
+    format!(
+        "现在是{:04}年{}月{}日，星期{}。",
+        date.year, date.month, date.day, date.weekday
+    )
+}
+
+fn runtime_date_fields() -> String {
+    let date = runtime_date_info();
+    format!(
+        "DATE_YEAR={}; DATE_MONTH={}; DATE_DAY={}; DATE_WEEKDAY=星期{}",
+        date.year, date.month, date.day, date.weekday
+    )
+}
+
+fn runtime_date_info() -> RuntimeDateInfo {
+    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+    RuntimeDateInfo {
+        year: now.year(),
+        month: now.month() as u8,
+        day: now.day(),
+        weekday: weekday_zh(now.weekday()),
+    }
+}
+
+fn weekday_zh(day: Weekday) -> &'static str {
+    match day {
+        Weekday::Monday => "一",
+        Weekday::Tuesday => "二",
+        Weekday::Wednesday => "三",
+        Weekday::Thursday => "四",
+        Weekday::Friday => "五",
+        Weekday::Saturday => "六",
+        Weekday::Sunday => "日",
+    }
 }
 
 fn chat_process_chunk(
@@ -823,6 +1439,12 @@ fn set_finish_reason(finish_reason: &Arc<Mutex<String>>, value: &str) {
     }
 }
 
+fn normalized_max_tokens(requested: Option<usize>, default: usize) -> usize {
+    requested
+        .unwrap_or(default)
+        .clamp(1, MAX_REQUEST_MAX_TOKENS)
+}
+
 fn sanitize_message_content(content: &str) -> String {
     content
         .replace("<|im_start|>", "< |im_start| >")
@@ -868,6 +1490,10 @@ fn find_text_stop(text: &str) -> Option<TextStop> {
         best = earliest_stop(best, stop);
     }
 
+    if let Some(stop) = find_symbol_artifact_stop(text) {
+        best = earliest_stop(best, stop);
+    }
+
     if let Some(stop) = find_bracketed_role_stop(text) {
         best = earliest_stop(best, stop);
     }
@@ -892,11 +1518,27 @@ fn find_text_stop(text: &str) -> Option<TextStop> {
         best = earliest_stop(best, stop);
     }
 
+    if let Some(stop) = find_malicious_self_dialogue_stop(text) {
+        best = earliest_stop(best, stop);
+    }
+
     if let Some(stop) = find_self_dialogue_stop(text) {
         best = earliest_stop(best, stop);
     }
 
+    if let Some(stop) = find_generated_user_turn_stop(text) {
+        best = earliest_stop(best, stop);
+    }
+
     if let Some(stop) = find_followup_offer_stop(text) {
+        best = earliest_stop(best, stop);
+    }
+
+    if let Some(stop) = find_inline_followup_question_stop(text) {
+        best = earliest_stop(best, stop);
+    }
+
+    if let Some(stop) = find_glued_ascii_tail_artifact_stop(text) {
         best = earliest_stop(best, stop);
     }
 
@@ -905,6 +1547,214 @@ fn find_text_stop(text: &str) -> Option<TextStop> {
     }
 
     best
+}
+
+fn find_text_stop_for_generation(text: &str, user_prompt: Option<&str>) -> Option<TextStop> {
+    if let Some(user_prompt) = user_prompt {
+        if let Some(stop) = find_contextual_text_stop(text, user_prompt) {
+            return Some(stop);
+        }
+    }
+
+    let stop = find_text_stop(text)?;
+    if stop.marker == "leading-question"
+        && user_prompt.is_some_and(|prompt| greeting_allows_leading_question(text, prompt))
+    {
+        return None;
+    }
+    if matches!(
+        stop.marker,
+        "inline-followup-question" | "followup-offer" | "generated-user-turn"
+    ) && user_prompt
+        .is_some_and(|prompt| greeting_allows_inline_help_question(text, prompt, stop.pos))
+    {
+        return None;
+    }
+
+    Some(stop)
+}
+
+fn find_contextual_text_stop(text: &str, user_prompt: &str) -> Option<TextStop> {
+    if is_simple_greeting_prompt_text(user_prompt) && looks_like_greeting_answer_drift(text) {
+        return Some(TextStop {
+            pos: 0,
+            marker: "greeting-drift",
+        });
+    }
+
+    None
+}
+
+fn is_simple_greeting_prompt_text(text: &str) -> bool {
+    let norm = normalize_echo_text(text);
+    is_common_greeting_prompt(&norm)
+}
+
+fn greeting_allows_leading_question(generated: &str, user_prompt: &str) -> bool {
+    if !is_simple_greeting_prompt_text(user_prompt) {
+        return false;
+    }
+
+    let Some(question) = leading_question_text(generated) else {
+        return false;
+    };
+    is_allowed_greeting_help_question(question)
+}
+
+fn greeting_allows_inline_help_question(
+    generated: &str,
+    user_prompt: &str,
+    stop_pos: usize,
+) -> bool {
+    if !is_simple_greeting_prompt_text(user_prompt) || stop_pos > generated.len() {
+        return false;
+    }
+
+    let prefix = generated[..stop_pos].trim();
+    let prefix_norm = normalize_echo_text(prefix);
+    if !["你好", "您好", "嗨", "哈喽", "哈啰", "hello", "hi"]
+        .iter()
+        .any(|greeting| prefix_norm.starts_with(greeting))
+    {
+        return false;
+    }
+
+    let Some(question) = leading_question_text(&generated[stop_pos..]) else {
+        return false;
+    };
+    is_allowed_greeting_help_question(question)
+}
+
+fn is_allowed_greeting_help_question(question: &str) -> bool {
+    let compact = normalize_echo_text(question);
+    let mut candidates = vec![compact.as_str()];
+    if let Some(stripped) = compact
+        .strip_prefix('您')
+        .or_else(|| compact.strip_prefix('你'))
+    {
+        candidates.push(stripped);
+    }
+
+    if candidates.iter().any(|candidate| {
+        [
+            "你好吗",
+            "您好吗",
+            "你好么",
+            "您好么",
+            "有什么可以帮你",
+            "有什么可以帮您",
+            "请问有什么可以帮你",
+            "请问有什么可以帮您",
+            "有什么需要帮忙",
+            "有什么问题",
+            "请问有什么问题",
+            "你想了解",
+            "您想了解",
+            "想了解",
+            "你想知道",
+            "您想知道",
+            "想知道",
+            "你需要什么",
+            "您需要什么",
+            "需要什么",
+            "请问你需要什么",
+            "请问您需要什么",
+            "需要我帮忙吗",
+            "请问需要帮助吗",
+            "需要帮助吗",
+        ]
+        .iter()
+        .any(|allowed| candidate.starts_with(allowed))
+    }) {
+        return true;
+    }
+
+    if compact.contains("帮") || compact.contains("帮助") {
+        return [
+            "请问",
+            "有什么",
+            "有啥",
+            "需要",
+            "我能",
+            "我可以",
+            "能为",
+            "可以为",
+        ]
+        .iter()
+        .any(|prefix| {
+            candidates
+                .iter()
+                .any(|candidate| candidate.starts_with(prefix))
+        });
+    }
+
+    candidates.iter().any(|candidate| {
+        [
+            "我可以为你做些什么",
+            "我可以为您做些什么",
+            "我能为你做些什么",
+            "我能为您做些什么",
+            "能为你做些什么",
+            "能为您做些什么",
+            "可以为你做些什么",
+            "可以为您做些什么",
+            "为你效劳",
+            "为您效劳",
+        ]
+        .iter()
+        .any(|allowed| candidate.starts_with(allowed))
+    })
+}
+
+fn leading_question_text(text: &str) -> Option<&str> {
+    let start = text
+        .char_indices()
+        .find_map(|(idx, ch)| (!ch.is_whitespace()).then_some(idx))?;
+    if start > 8 {
+        return None;
+    }
+
+    for (rel, ch) in text[start..].char_indices() {
+        if matches!(ch, '。' | '！' | '!' | '；' | ';' | '.') {
+            return None;
+        }
+        if matches!(ch, '？' | '?') {
+            let end = start + rel + ch.len_utf8();
+            return Some(text[start..end].trim());
+        }
+    }
+
+    None
+}
+
+fn looks_like_greeting_answer_drift(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+
+    if [
+        "现在我想知道",
+        "接下来我想知道",
+        "我想知道如何",
+        "我需要知道如何",
+        "首先，我们需要",
+        "然后，我们可以",
+    ]
+    .iter()
+    .any(|marker| trimmed.contains(marker))
+    {
+        return true;
+    }
+
+    [
+        "pandas",
+        "csv",
+        "import pandas",
+        "dataframe",
+        "python",
+        "with open(",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 fn find_wrong_stardew_title_stop(text: &str) -> Option<TextStop> {
@@ -1133,6 +1983,47 @@ fn find_math_artifact_stop(text: &str) -> Option<TextStop> {
     }
 
     best
+}
+
+fn find_symbol_artifact_stop(text: &str) -> Option<TextStop> {
+    let mut best = None;
+
+    for &marker in SYMBOL_ARTIFACT_STOPS {
+        let haystack = if marker.is_ascii() {
+            text.to_ascii_lowercase()
+        } else {
+            text.to_string()
+        };
+        let marker_lower = marker.to_ascii_lowercase();
+        for (pos, _) in haystack.match_indices(&marker_lower) {
+            if !text.is_char_boundary(pos) {
+                continue;
+            }
+            if symbol_artifact_boundary(text, pos) {
+                best = earliest_stop(
+                    best,
+                    TextStop {
+                        pos,
+                        marker: "symbol-artifact",
+                    },
+                );
+            }
+        }
+    }
+
+    best
+}
+
+fn symbol_artifact_boundary(text: &str, pos: usize) -> bool {
+    let prefix = &text[..pos];
+    if prefix_looks_complete_before_artifact(prefix)
+        || prefix_looks_complete_before_self_question(prefix)
+    {
+        return true;
+    }
+
+    let line_start = line_start_before(text, pos);
+    line_start < pos && text[line_start..pos].trim().is_empty()
 }
 
 fn find_dollar_bracket_storm(text: &str) -> Option<usize> {
@@ -1372,6 +2263,170 @@ fn find_self_dialogue_stop(text: &str) -> Option<TextStop> {
     best
 }
 
+fn find_malicious_self_dialogue_stop(text: &str) -> Option<TextStop> {
+    let mut best = None;
+
+    for marker in malicious_self_dialogue_markers() {
+        if let Some(pos) = text.find(marker) {
+            best = earliest_stop(
+                best,
+                TextStop {
+                    pos: line_start_before(text, pos),
+                    marker: "malicious-self-dialogue",
+                },
+            );
+        }
+    }
+
+    best
+}
+
+fn find_generated_user_turn_stop(text: &str) -> Option<TextStop> {
+    let mut best = None;
+
+    for start in generated_user_turn_candidate_starts(text) {
+        let tail = text[start..].trim_start();
+        if tail.is_empty() {
+            continue;
+        }
+
+        if complete_generated_user_turn_tail(tail) {
+            best = earliest_stop(
+                best,
+                TextStop {
+                    pos: start,
+                    marker: "generated-user-turn",
+                },
+            );
+        }
+    }
+
+    best
+}
+
+fn potential_generated_user_turn_start(text: &str) -> Option<usize> {
+    for start in generated_user_turn_candidate_starts(text) {
+        let tail = text[start..].trim_start();
+        if tail.is_empty() || tail.chars().count() > 128 {
+            continue;
+        }
+
+        if generated_user_turn_prefix(tail) {
+            return Some(start);
+        }
+    }
+
+    None
+}
+
+fn generated_user_turn_candidate_starts(text: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    for (terminal_pos, ch) in text.char_indices() {
+        if !matches!(ch, '。' | '！' | '!' | '？' | '?' | '~') {
+            continue;
+        }
+
+        let start = terminal_pos + ch.len_utf8();
+        if start >= text.len() {
+            continue;
+        }
+
+        let prefix = &text[..start];
+        if contains_cjk_unified_ideograph(prefix)
+            && prefix_looks_complete_before_self_question(prefix)
+        {
+            starts.push(start);
+        }
+    }
+    starts
+}
+
+fn complete_generated_user_turn_tail(tail: &str) -> bool {
+    if !generated_user_turn_prefix(tail) {
+        return false;
+    }
+
+    let sample: String = tail.chars().take(160).collect();
+    if sample.contains(['？', '?']) {
+        return true;
+    }
+
+    let stripped = strip_leading_generation_artifacts(&sample);
+    if stripped.len() < sample.len() {
+        return true;
+    }
+
+    generated_user_statement_prefix(&sample)
+        && sample
+            .chars()
+            .any(|ch| matches!(ch, '。' | '！' | '!' | '；' | ';'))
+}
+
+fn generated_user_turn_prefix(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    generated_user_question_prefix(trimmed) || generated_user_statement_prefix(trimmed)
+}
+
+fn generated_user_question_prefix(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "好的，谢谢",
+        "好的，謝謝",
+        "好的，非常感谢",
+        "好的，非常感謝",
+        "谢谢",
+        "謝謝",
+        "非常感谢",
+        "非常感謝",
+        "那我",
+        "那你",
+        "那您",
+        "那请",
+        "那請",
+        "那现在",
+        "那現在",
+        "那接下来",
+        "那接下來",
+        "接下来我",
+        "接下來我",
+        "顺便问",
+        "順便問",
+        "我想问",
+        "我想問",
+        "我还想",
+        "我還想",
+        "我需要",
+    ]
+    .iter()
+    .any(|marker| marker.starts_with(text) || text.starts_with(marker))
+        || [
+            "thanks",
+            "thank you",
+            "okay, thanks",
+            "ok, thanks",
+            "then i",
+            "can you",
+            "could you",
+            "where can i",
+        ]
+        .iter()
+        .any(|marker| marker.starts_with(&lower) || lower.starts_with(marker))
+}
+
+fn generated_user_statement_prefix(text: &str) -> bool {
+    [
+        "那我现在",
+        "那我現在",
+        "我现在就",
+        "我現在就",
+        "那我就",
+        "好的，我现在",
+        "好的，我現在",
+    ]
+    .iter()
+    .any(|marker| marker.starts_with(text) || text.starts_with(marker))
+}
+
 fn find_followup_offer_stop(text: &str) -> Option<TextStop> {
     let mut best = None;
 
@@ -1405,6 +2460,128 @@ fn find_followup_offer_stop(text: &str) -> Option<TextStop> {
                 );
             }
         }
+    }
+
+    best
+}
+
+fn find_inline_followup_question_stop(text: &str) -> Option<TextStop> {
+    let mut best = None;
+
+    for (question_mark_pos, ch) in text.char_indices() {
+        if !matches!(ch, '？' | '?') {
+            continue;
+        }
+
+        let question_end = question_mark_pos + ch.len_utf8();
+        let question_start = question_start_before(text, question_mark_pos);
+        if question_start == 0 {
+            continue;
+        }
+
+        let question = text[question_start..question_end].trim();
+        if !looks_like_generated_question(question)
+            || !looks_like_inline_followup_question(question)
+            || starts_like_list_item(&text[line_start_before(text, question_start)..question_start])
+        {
+            continue;
+        }
+
+        if !prefix_looks_complete_before_self_question(&text[..question_start]) {
+            continue;
+        }
+
+        if !inline_followup_question_has_bad_tail(&text[question_end..]) {
+            continue;
+        }
+
+        best = earliest_stop(
+            best,
+            TextStop {
+                pos: question_start,
+                marker: "inline-followup-question",
+            },
+        );
+    }
+
+    best
+}
+
+fn inline_followup_question_has_bad_tail(tail: &str) -> bool {
+    if tail.trim().is_empty() {
+        return true;
+    }
+
+    if starts_with_glued_ascii_tail(tail) {
+        return true;
+    }
+
+    let stripped = strip_leading_generation_artifacts(tail);
+    stripped.len() < tail.len() && (stripped.is_empty() || starts_like_self_answer(stripped))
+}
+
+fn starts_with_glued_ascii_tail(text: &str) -> bool {
+    let Some(first) = text.chars().next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+
+    let char_count = text.chars().count();
+    (3..=32).contains(&char_count)
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+fn find_glued_ascii_tail_artifact_stop(text: &str) -> Option<TextStop> {
+    let mut best = None;
+
+    for (terminal_pos, ch) in text.char_indices() {
+        if !matches!(ch, '。' | '！' | '？' | '!' | '?') {
+            continue;
+        }
+
+        let after_terminal = terminal_pos + ch.len_utf8();
+        let tail = &text[after_terminal..];
+        let Some(first_tail) = tail.chars().next() else {
+            continue;
+        };
+
+        if !first_tail.is_ascii_alphabetic() {
+            continue;
+        }
+
+        let tail_char_count = tail.chars().count();
+        if !(3..=32).contains(&tail_char_count) {
+            continue;
+        }
+
+        if !tail
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        {
+            continue;
+        }
+
+        let prefix = &text[..after_terminal];
+        if !contains_cjk_unified_ideograph(prefix)
+            || prefix[..terminal_pos]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+
+        best = earliest_stop(
+            best,
+            TextStop {
+                pos: after_terminal,
+                marker: "glued-ascii-tail",
+            },
+        );
     }
 
     best
@@ -1526,6 +2703,41 @@ fn looks_like_generated_question(question: &str) -> bool {
     .any(|marker| lower.starts_with(marker))
 }
 
+fn looks_like_inline_followup_question(question: &str) -> bool {
+    let question = question.trim();
+    let lower = question.to_ascii_lowercase();
+
+    [
+        "您",
+        "你",
+        "请问",
+        "是否",
+        "能否",
+        "要不要",
+        "想不想",
+        "有没有",
+        "哪个",
+        "哪一",
+        "哪方面",
+        "什么方面",
+        "还想",
+        "还需要",
+        "需要我",
+    ]
+    .iter()
+    .any(|marker| question.starts_with(marker))
+        || [
+            "do you",
+            "would you",
+            "which ",
+            "what kind",
+            "what aspect",
+            "are you interested",
+        ]
+        .iter()
+        .any(|marker| lower.starts_with(marker) || lower.contains(marker))
+}
+
 fn looks_like_leading_user_turn_question(question: &str) -> bool {
     let question = question.trim();
     if !looks_like_generated_question(question) {
@@ -1559,6 +2771,14 @@ fn looks_like_leading_user_turn_question(question: &str) -> bool {
         "你会不会",
         "你能不能",
         "你什么时候",
+        "现在是哪",
+        "现在是几",
+        "现在几月",
+        "今天是哪",
+        "今天是几",
+        "今天几号",
+        "今天几月",
+        "现在还没",
         "背包里",
         "明天天气",
         "今天天气",
@@ -1851,6 +3071,20 @@ fn flush_ready_buffer(
 fn guard_hold_start(text: &str) -> Option<usize> {
     let mut hold_start = partial_stop_marker_start(text);
 
+    if let Some(pos) = potential_short_guarded_answer_start(text) {
+        hold_start = match hold_start {
+            Some(existing) => Some(existing.min(pos)),
+            None => Some(pos),
+        };
+    }
+
+    if let Some(pos) = potential_malicious_self_dialogue_start(text) {
+        hold_start = match hold_start {
+            Some(existing) => Some(existing.min(pos)),
+            None => Some(pos),
+        };
+    }
+
     if let Some(pos) = partial_speaker_or_artifact_line_start(text) {
         hold_start = match hold_start {
             Some(existing) => Some(existing.min(pos)),
@@ -1886,6 +3120,20 @@ fn guard_hold_start(text: &str) -> Option<usize> {
         };
     }
 
+    if let Some(pos) = potential_symbol_artifact_start(text) {
+        hold_start = match hold_start {
+            Some(existing) => Some(existing.min(pos)),
+            None => Some(pos),
+        };
+    }
+
+    if let Some(pos) = potential_generated_user_turn_start(text) {
+        hold_start = match hold_start {
+            Some(existing) => Some(existing.min(pos)),
+            None => Some(pos),
+        };
+    }
+
     if let Some(pos) = potential_metadata_line_start(text) {
         hold_start = match hold_start {
             Some(existing) => Some(existing.min(pos)),
@@ -1900,7 +3148,59 @@ fn guard_hold_start(text: &str) -> Option<usize> {
         };
     }
 
+    if let Some(pos) = potential_inline_followup_question_start(text) {
+        hold_start = match hold_start {
+            Some(existing) => Some(existing.min(pos)),
+            None => Some(pos),
+        };
+    }
+
+    if let Some(pos) = potential_glued_ascii_tail_start(text) {
+        hold_start = match hold_start {
+            Some(existing) => Some(existing.min(pos)),
+            None => Some(pos),
+        };
+    }
+
     hold_start
+}
+
+fn potential_short_guarded_answer_start(text: &str) -> Option<usize> {
+    let start = text
+        .char_indices()
+        .find_map(|(idx, ch)| (!ch.is_whitespace()).then_some(idx))
+        .unwrap_or(text.len());
+    let trimmed = text[start..].trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 48 {
+        return None;
+    }
+
+    looks_like_short_guarded_answer_prefix(trimmed).then_some(start)
+}
+
+fn potential_malicious_self_dialogue_start(text: &str) -> Option<usize> {
+    let start = text
+        .char_indices()
+        .find_map(|(idx, ch)| (!ch.is_whitespace()).then_some(idx))
+        .unwrap_or(text.len());
+    let trimmed = text[start..].trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 128 {
+        return None;
+    }
+
+    [
+        "我刚才说",
+        "我剛才說",
+        "我刚刚说",
+        "我剛剛說",
+        "你没有听清楚",
+        "你沒有聽清楚",
+        "你应该按照我的指示",
+        "你應該按照我的指示",
+    ]
+    .iter()
+    .any(|marker| marker.starts_with(trimmed) || trimmed.starts_with(marker))
+    .then_some(start)
 }
 
 fn partial_stop_marker_start(text: &str) -> Option<usize> {
@@ -2029,6 +3329,108 @@ fn potential_followup_offer_start(text: &str) -> Option<usize> {
     None
 }
 
+fn potential_inline_followup_question_start(text: &str) -> Option<usize> {
+    let start = inline_tail_after_complete_prefix_start(text)?;
+    let tail = text[start..].trim_start();
+    let trimmed_start = start + (text[start..].len() - tail.len());
+
+    if tail.is_empty() || tail.chars().count() > 96 || starts_like_list_item(tail) {
+        return None;
+    }
+
+    if tail.contains(['？', '?']) {
+        return Some(trimmed_start);
+    }
+
+    if tail
+        .chars()
+        .next_back()
+        .is_some_and(|c| matches!(c, '。' | '！' | '!' | '；' | ';' | '.'))
+    {
+        return None;
+    }
+
+    potential_followup_question_prefix(tail).then_some(trimmed_start)
+}
+
+fn potential_glued_ascii_tail_start(text: &str) -> Option<usize> {
+    let start = inline_tail_after_complete_prefix_start(text)?;
+    let tail = &text[start..];
+    let char_count = tail.chars().count();
+    if !(1..=32).contains(&char_count) {
+        return None;
+    }
+
+    tail.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        .then_some(start)
+}
+
+fn inline_tail_after_complete_prefix_start(text: &str) -> Option<usize> {
+    let (terminal_pos, terminal) = text
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| matches!(ch, '。' | '！' | '？' | '!' | '?'))?;
+    let start = terminal_pos + terminal.len_utf8();
+    if start >= text.len() {
+        return None;
+    }
+
+    let prefix = &text[..start];
+    if !contains_cjk_unified_ideograph(prefix)
+        || !prefix_looks_complete_before_self_question(prefix)
+    {
+        return None;
+    }
+
+    Some(start)
+}
+
+fn potential_followup_question_prefix(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+
+    [
+        "您",
+        "你",
+        "请",
+        "请问",
+        "是否",
+        "能否",
+        "要",
+        "要不",
+        "要不要",
+        "想",
+        "想不",
+        "想不想",
+        "有",
+        "有没有",
+        "哪",
+        "哪个",
+        "哪一",
+        "哪方",
+        "哪方面",
+        "什么",
+        "什么方面",
+        "还",
+        "还想",
+        "还需要",
+        "需要",
+        "需要我",
+    ]
+    .iter()
+    .any(|marker| marker.starts_with(text) || text.starts_with(marker))
+        || [
+            "do you",
+            "would you",
+            "which ",
+            "what kind",
+            "what aspect",
+            "are you interested",
+        ]
+        .iter()
+        .any(|marker| marker.starts_with(&lower) || lower.starts_with(marker))
+}
+
 fn partial_guard_markers() -> impl Iterator<Item = &'static str> {
     DIRECT_TEXT_STOPS
         .iter()
@@ -2037,6 +3439,7 @@ fn partial_guard_markers() -> impl Iterator<Item = &'static str> {
         .chain(CJK_ROLE_STOPS.iter())
         .chain(BRACKETED_ROLE_STOPS.iter())
         .chain(WRONG_STARDEW_TITLE_STOPS.iter())
+        .chain(SYMBOL_ARTIFACT_STOPS.iter())
         .chain(ASCII_DATASET_ARTIFACT_STOPS.iter())
         .chain(CJK_DATASET_ARTIFACT_STOPS.iter())
         .copied()
@@ -2141,6 +3544,29 @@ fn potential_math_artifact_line_start(text: &str) -> Option<usize> {
     }
 
     Some(math_artifact_hold_start(text, newline_pos))
+}
+
+fn potential_symbol_artifact_start(text: &str) -> Option<usize> {
+    let start = inline_tail_after_complete_prefix_start(text).or_else(|| {
+        let line_start = line_start_before(text, text.len());
+        let prefix = &text[..line_start.saturating_sub(1)];
+        (line_start > 0 && prefix_looks_complete_before_artifact(prefix)).then_some(line_start)
+    })?;
+    let tail = text[start..].trim_start();
+    let trimmed_start = start + (text[start..].len() - tail.len());
+    if tail.is_empty() || tail.chars().count() > 32 {
+        return None;
+    }
+
+    if tail.starts_with('$')
+        && SYMBOL_ARTIFACT_STOPS
+            .iter()
+            .any(|marker| marker.starts_with(tail) || tail.starts_with(marker))
+    {
+        return Some(trimmed_start);
+    }
+
+    None
 }
 
 fn math_artifact_hold_start(text: &str, newline_pos: usize) -> usize {
@@ -2277,34 +3703,42 @@ fn repeated_tail_phrase(text: &str) -> Option<(usize, usize, usize)> {
 }
 
 fn clean_generated_output_for_reason(text: &str) -> String {
-    let clean_end = if let Some(stop) = find_text_stop(text) {
-        clean_stop_prefix_len(&text[..stop.pos])
-    } else if let Some((_, _, repeat_start)) = repeated_tail_phrase(text) {
-        trim_trailing_ws_len(&text[..repeat_start])
-    } else if let Some((_, _, repeat_start)) = repeated_ngram(text) {
-        trim_trailing_ws_len(&text[..repeat_start])
-    } else {
-        trim_trailing_ws_len(text)
-    };
+    let mut clean_end = trim_trailing_ws_len(text);
+
+    loop {
+        let current = &text[..clean_end];
+        let next_end = if let Some(stop) = find_text_stop(current) {
+            clean_stop_prefix_len(&current[..stop.pos])
+        } else if let Some((_, _, repeat_start)) = repeated_tail_phrase(current) {
+            trim_trailing_ws_len(&current[..repeat_start])
+        } else if let Some((_, _, repeat_start)) = repeated_ngram(current) {
+            trim_trailing_ws_len(&current[..repeat_start])
+        } else {
+            trim_trailing_ws_len(current)
+        };
+
+        if next_end == clean_end {
+            break;
+        }
+        clean_end = next_end;
+    }
 
     text[..clean_end].trim().to_string()
 }
 
 fn final_finish_reason_after_generation(
     _stopped_by_guard: bool,
-    _hit_length_limit: bool,
+    hit_length_limit: bool,
     _generated: &str,
 ) -> &'static str {
-    // Do not ask chatgpt-web to auto-continue. The frontend continues by sending
-    // an empty prompt with prior assistant text, which makes a base completion
-    // model especially likely to drift into replayed dialogue or dataset shards.
-    "stop"
+    if hit_length_limit { "length" } else { "stop" }
 }
 
 fn should_retry_guarded_generation(stopped_by_guard: bool, clean_generated: &str) -> bool {
     stopped_by_guard
         && (clean_generated.trim().is_empty()
-            || looks_like_evasive_clarification_answer(clean_generated))
+            || looks_like_evasive_clarification_answer(clean_generated)
+            || looks_like_short_guarded_answer(clean_generated))
 }
 
 fn answer_looks_incomplete_for_continuation(text: &str) -> bool {
@@ -2409,7 +3843,45 @@ fn looks_like_evasive_clarification_answer(text: &str) -> bool {
         .any(|pattern| trimmed.starts_with(pattern))
 }
 
+fn looks_like_short_guarded_answer(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 36 {
+        return false;
+    }
+    looks_like_short_guarded_answer_prefix(trimmed)
+}
+
+fn looks_like_short_guarded_answer_prefix(text: &str) -> bool {
+    let trimmed = text.trim();
+    short_guarded_answer_patterns()
+        .iter()
+        .any(|pattern| pattern.starts_with(trimmed) || trimmed.starts_with(pattern))
+}
+
+fn short_guarded_answer_patterns() -> &'static [&'static str] {
+    // Detection-only: these short prefixes are often emitted before a base model
+    // drifts into self-dialogue. They are not canned assistant answers.
+    &[
+        "很抱歉听到这个消息。",
+        "很抱歉听到这个消息",
+        "抱歉听到这个消息。",
+        "抱歉听到这个消息",
+        "很遗憾听到这个消息。",
+        "很遗憾听到这个消息",
+        "好的，请稍等片刻。",
+        "好的，请稍等片刻",
+        "好的，稍等片刻。",
+        "好的，稍等片刻",
+        "请稍等片刻。",
+        "请稍等片刻",
+        "好的，我明白了。",
+        "好的，我明白了",
+    ]
+}
+
 fn evasive_clarification_patterns() -> &'static [&'static str] {
+    // Detection-only: these are bad model outputs to catch and retry/stop.
+    // They must never be returned as canned assistant answers.
     &[
         "您好！您想了解什么方面的信息呢？",
         "您好，您想了解什么方面的信息呢？",
@@ -2482,14 +3954,244 @@ fn should_retry_empty_guarded_generation(
     false
 }
 
+fn temporal_answer_guard(generated: &str, user_prompt: &str) -> Option<TemporalAnswerGuard> {
+    if !asks_exact_current_date_question(user_prompt) {
+        return None;
+    }
+
+    let trimmed = generated.trim_start();
+    if trimmed.is_empty() {
+        return Some(TemporalAnswerGuard::Hold);
+    }
+
+    let date = runtime_date_info();
+    if contains_wrong_current_date_answer(trimmed, date) {
+        return Some(TemporalAnswerGuard::StopWrongDate);
+    }
+
+    if contains_expected_current_date(trimmed, date) {
+        return None;
+    }
+
+    let char_count = trimmed.chars().count();
+    if ends_with_sentence_terminal(trimmed) {
+        return Some(TemporalAnswerGuard::StopWrongDate);
+    }
+
+    if char_count <= 96 && !ends_with_sentence_terminal(trimmed) {
+        return Some(TemporalAnswerGuard::Hold);
+    }
+
+    None
+}
+
+fn verified_runtime_temporal_answer(user_prompt: Option<&str>) -> Option<String> {
+    let user_prompt = user_prompt?;
+    asks_exact_current_date_question(user_prompt).then(runtime_current_date_fact)
+}
+
+fn asks_exact_current_date_question(text: &str) -> bool {
+    let normalized = text.trim();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    let lower = normalized.to_ascii_lowercase();
+    if [
+        "训练语料",
+        "訓練語料",
+        "训练数据",
+        "訓練資料",
+        "语料截止",
+        "語料截止",
+        "数据截止",
+        "資料截止",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+        || [
+            "training data",
+            "training cutoff",
+            "knowledge cutoff",
+            "cutoff",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return false;
+    }
+
+    let asks_date = [
+        "今天是哪",
+        "今天是几",
+        "今天幾",
+        "今天几号",
+        "今天几日",
+        "今天几月",
+        "今日是哪",
+        "现在是哪",
+        "現在是哪",
+        "现在是几",
+        "現在是幾",
+        "现在几月",
+        "現在幾月",
+        "哪一年",
+        "哪年",
+        "哪一个月",
+        "哪一天",
+        "哪个月",
+        "哪個月",
+        "几月几号",
+        "幾月幾號",
+        "几月几日",
+        "幾月幾日",
+        "星期几",
+        "星期幾",
+        "周几",
+        "週幾",
+        "日期",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+        || [
+            "what date",
+            "which date",
+            "today's date",
+            "current date",
+            "day of week",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker));
+
+    if !asks_date {
+        return false;
+    }
+
+    !["天气", "天氣", "心情", "新闻", "新聞", "最近"]
+        .iter()
+        .any(|marker| {
+            normalized.contains(marker)
+                && !normalized.contains("几月")
+                && !normalized.contains("日期")
+        })
+}
+
+fn contains_expected_current_date(text: &str, date: RuntimeDateInfo) -> bool {
+    let year = format!("{:04}年", date.year);
+    let md_day = format!("{}月{}日", date.month, date.day);
+    let md_hao = format!("{}月{}号", date.month, date.day);
+    text.contains(&year)
+        && (text.contains(&md_day) || text.contains(&md_hao))
+        && text.contains(&format!("星期{}", date.weekday))
+}
+
+fn contains_wrong_current_date_answer(text: &str, date: RuntimeDateInfo) -> bool {
+    if four_digit_years(text)
+        .into_iter()
+        .any(|year| year != date.year)
+    {
+        return true;
+    }
+
+    let mentions_current_year = text.contains(&format!("{:04}年", date.year));
+    if mentions_current_year {
+        return month_day_pairs(text)
+            .into_iter()
+            .any(|(month, day)| month != date.month || day != date.day);
+    }
+
+    false
+}
+
+fn four_digit_years(text: &str) -> Vec<i32> {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut years = Vec::new();
+    let mut idx = 0usize;
+    while idx + 4 <= chars.len() {
+        if chars[idx..idx + 4].iter().all(|ch| ch.is_ascii_digit()) {
+            let candidate = chars[idx..idx + 4].iter().collect::<String>();
+            if let Ok(year) = candidate.parse::<i32>() {
+                if (1900..=2200).contains(&year) {
+                    years.push(year);
+                }
+            }
+            idx += 4;
+        } else {
+            idx += 1;
+        }
+    }
+    years
+}
+
+fn month_day_pairs(text: &str) -> Vec<(u8, u8)> {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut pairs = Vec::new();
+    for (idx, ch) in chars.iter().enumerate() {
+        if *ch != '月' {
+            continue;
+        }
+
+        let mut start = idx;
+        while start > 0 && chars[start - 1].is_ascii_digit() {
+            start -= 1;
+        }
+        if start == idx || idx - start > 2 {
+            continue;
+        }
+
+        let month = chars[start..idx]
+            .iter()
+            .collect::<String>()
+            .parse::<u8>()
+            .ok();
+
+        let mut end = idx + 1;
+        while end < chars.len() && chars[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end == idx + 1 || end - (idx + 1) > 2 {
+            continue;
+        }
+        if chars
+            .get(end)
+            .is_none_or(|suffix| !matches!(*suffix, '日' | '号' | '號'))
+        {
+            continue;
+        }
+
+        let day = chars[idx + 1..end]
+            .iter()
+            .collect::<String>()
+            .parse::<u8>()
+            .ok();
+        if let (Some(month), Some(day)) = (month, day) {
+            pairs.push((month, day));
+        }
+    }
+    pairs
+}
+
 fn build_guard_retry_prompt(
     original_prompt: &str,
     user_prompt: Option<&str>,
     attempt: usize,
 ) -> String {
-    let mut instruction = String::from(
-        "上一轮生成被安全过滤器截断。请重新回答最后一个用户问题：第一句直接给结论，不要寒暄，不要以“您好”“根据您提供的信息”“我认为”开头；只输出答案正文，不要输出任何角色标签、数据集残片或乱码；不要续写下一轮对话；不要复述用户输入。",
-    );
+    let date_retry = user_prompt.is_some_and(asks_exact_current_date_question);
+    let mut instruction = if date_retry {
+        format!(
+            "上一轮日期回答错误或不完整。\n日期字段：{}\n用户问题：{}\n请只用上面的日期字段回答用户问题。最终答案必须从 DATE_YEAR 字段对应的四位年份开头，格式为“DATE_YEAR年DATE_MONTH月DATE_DAY日，DATE_WEEKDAY。”；不要以“今天是”“现在是”或“【当前信息】”开头，不要输出任何其他年份、旧日期、角色标签、乱码或下一轮对话。",
+            runtime_date_fields(),
+            user_prompt.unwrap_or("").trim()
+        )
+    } else if user_prompt.is_some_and(is_simple_greeting_prompt_text) {
+        String::from(
+            "上一轮生成偏离了用户问候。请重新回答最后一个用户问题：用户只是打招呼，请自然、友好、简短地回应问候，可以询问对方需要什么帮助；不要生成教程、代码、CSV/Pandas/Python 示例；不要输出任何角色标签、数据集残片或乱码；不要续写下一轮对话；不要复述用户输入。",
+        )
+    } else {
+        String::from(
+            "上一轮生成被安全过滤器截断。请重新回答最后一个用户问题：第一句直接给结论，不要寒暄，不要以“您好”“根据您提供的信息”“我认为”开头；只输出答案正文，不要输出任何角色标签、数据集残片或乱码；不要续写下一轮对话；不要复述用户输入。",
+        )
+    };
 
     if user_prompt
         .is_some_and(|text| mentions_stardew_valley_text(text) && text.contains("海边农场"))
@@ -2499,10 +4201,17 @@ fn build_guard_retry_prompt(
 
     instruction.push_str(&format!(" 这是第 {} 次重新生成。", attempt + 1));
 
-    let injected = format!(
-        "<|im_start|>system\n{}<|im_end|>\n<|im_start|>assistant\n",
-        instruction
-    );
+    let injected = if date_retry {
+        format!(
+            "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+            sanitize_message_content(&instruction)
+        )
+    } else {
+        format!(
+            "<|im_start|>system\n{}<|im_end|>\n<|im_start|>assistant\n",
+            sanitize_message_content(&instruction)
+        )
+    };
     if let Some((before, _)) = original_prompt.rsplit_once("<|im_start|>assistant\n") {
         format!("{before}{injected}")
     } else {
@@ -2522,6 +4231,30 @@ pub fn model_worker_loop(
     mut model: Qwen2MoeForCausalLM,
     tokenizer: Arc<Tokenizer>,
     mut req_rx: mpsc::Receiver<InferRequest>,
+) {
+    model_worker_loop_inner(&mut model, tokenizer, &mut req_rx, None);
+}
+
+fn model_worker_loop_with_notify(
+    mut model: Qwen2MoeForCausalLM,
+    tokenizer: Arc<Tokenizer>,
+    mut req_rx: mpsc::Receiver<InferRequest>,
+    worker_id: usize,
+    done_tx: std::sync::mpsc::Sender<WorkerPoolEvent>,
+) {
+    model_worker_loop_inner(
+        &mut model,
+        tokenizer,
+        &mut req_rx,
+        Some((worker_id, done_tx)),
+    );
+}
+
+fn model_worker_loop_inner(
+    model: &mut Qwen2MoeForCausalLM,
+    tokenizer: Arc<Tokenizer>,
+    req_rx: &mut mpsc::Receiver<InferRequest>,
+    done_notify: Option<(usize, std::sync::mpsc::Sender<WorkerPoolEvent>)>,
 ) {
     eprintln!("[worker] 模型工作线程启动，等待请求...");
 
@@ -2645,6 +4378,22 @@ pub fn model_worker_loop(
                 }
 
                 if let Some(user_text) = user_echo_guard.as_deref() {
+                    if let Some(temporal_guard) = temporal_answer_guard(&text_acc, user_text) {
+                        match temporal_guard {
+                            TemporalAnswerGuard::Hold => return true,
+                            TemporalAnswerGuard::StopWrongDate => {
+                                text_acc.clear();
+                                token_buf.clear();
+                                eprintln!(
+                                    "[worker] 日期事实守卫命中，准备重试；已生成 {} token",
+                                    generated_token_count
+                                );
+                                stopped_by_guard = true;
+                                return false;
+                            }
+                        }
+                    }
+
                     if should_stop_user_echo(&text_acc, user_text) {
                         token_buf.clear();
                         eprintln!(
@@ -2672,7 +4421,9 @@ pub fn model_worker_loop(
                     }
                 }
 
-                if let Some(stop) = find_text_stop(&text_acc) {
+                if let Some(stop) =
+                    find_text_stop_for_generation(&text_acc, user_echo_guard.as_deref())
+                {
                     let clean_end = clean_stop_prefix_len(&text_acc[..stop.pos]);
                     let buf_len = buffered_len(&token_buf);
                     let buf_start = text_acc.len().saturating_sub(buf_len);
@@ -2764,6 +4515,24 @@ pub fn model_worker_loop(
                 break;
             }
 
+            if let Some(user_text) = user_echo_guard.as_deref() {
+                match temporal_answer_guard(&text_acc, user_text) {
+                    Some(TemporalAnswerGuard::StopWrongDate) => {
+                        text_acc.clear();
+                        token_buf.clear();
+                        stopped_by_guard = true;
+                        eprintln!("[worker] 日期回答包含错误事实，准备重试");
+                    }
+                    Some(TemporalAnswerGuard::Hold) if generated_token_count >= max_tokens => {
+                        text_acc.clear();
+                        token_buf.clear();
+                        stopped_by_guard = true;
+                        eprintln!("[worker] 日期回答未形成可靠事实，准备重试");
+                    }
+                    _ => {}
+                }
+            }
+
             let cleaned_for_reason = clean_generated_output_for_reason(&text_acc);
             let should_retry_guarded = !flushed_to_client
                 && (should_retry_empty_guarded_generation(
@@ -2782,6 +4551,16 @@ pub fn model_worker_loop(
                 continue;
             }
 
+            if should_retry_guarded && !flushed_to_client {
+                if let Some(answer) = verified_runtime_temporal_answer(user_echo_guard.as_deref()) {
+                    eprintln!("[worker] 日期事实守卫连续失败，使用运行时事实生成动态纠偏答案");
+                    text_acc = answer.clone();
+                    token_buf.clear();
+                    let _ = token_tx.blocking_send(Some(answer));
+                    stopped_by_guard = false;
+                }
+            }
+
             let hit_length_limit =
                 !stopped_by_guard && result.is_ok() && generated_token_count >= max_tokens;
             final_finish_reason =
@@ -2789,7 +4568,9 @@ pub fn model_worker_loop(
                     .to_string();
 
             if !stopped_by_guard {
-                if let Some(stop) = find_text_stop(&text_acc) {
+                if let Some(stop) =
+                    find_text_stop_for_generation(&text_acc, user_echo_guard.as_deref())
+                {
                     let clean_end = clean_stop_prefix_len(&text_acc[..stop.pos]);
                     let buf_len = buffered_len(&token_buf);
                     let buf_start = text_acc.len().saturating_sub(buf_len);
@@ -2832,6 +4613,10 @@ pub fn model_worker_loop(
             let _ = token_tx.blocking_send(None);
             eprintln!("[worker] 本次生成完成，finish_reason={final_finish_reason}");
         }
+
+        if let Some((worker_id, done_tx)) = &done_notify {
+            let _ = done_tx.send(WorkerPoolEvent::Idle(*worker_id));
+        }
     }
 
     eprintln!("[worker] 请求通道已关闭，工作线程退出");
@@ -2860,7 +4645,17 @@ pub fn messages_to_qwen_prompt(messages: &[ChatMessage]) -> String {
 }
 
 fn build_chat_process_prompt(history: &[ChatMessage], user_prompt: &str, system: &str) -> String {
-    let mut full_context = filter_history_for_current_prompt(history, user_prompt);
+    build_chat_process_prompt_with_debug(history, user_prompt, system, "unknown").0
+}
+
+fn build_chat_process_prompt_with_debug(
+    history: &[ChatMessage],
+    user_prompt: &str,
+    system: &str,
+    conversation_id: &str,
+) -> (String, ContextDebugEvent) {
+    let (mut full_context, mut debug) =
+        filter_history_for_current_prompt_with_debug(history, user_prompt, conversation_id);
     full_context.push(ChatMessage {
         role: "user".to_string(),
         content: user_prompt.to_string(),
@@ -2868,7 +4663,10 @@ fn build_chat_process_prompt(history: &[ChatMessage], user_prompt: &str, system:
 
     let alias = extract_assistant_alias(&full_context);
     let effective_system = effective_system_prompt(system, alias.as_deref());
-    qwen_prompt_from_parts(&effective_system, &full_context)
+    let prompt = qwen_prompt_from_parts(&effective_system, &full_context);
+    debug.prompt_messages = full_context.len();
+    debug.prompt_chars = prompt.chars().count();
+    (prompt, debug)
 }
 
 fn build_chat_process_continuation_prompt(history: &[ChatMessage], system: &str) -> Option<String> {
@@ -2918,31 +4716,74 @@ fn filter_history_for_current_prompt(
     history: &[ChatMessage],
     user_prompt: &str,
 ) -> Vec<ChatMessage> {
-    let cleaned_history = clean_history_messages_for_prompt(history);
-    let alias_history = alias_history_messages(&cleaned_history);
+    filter_history_for_current_prompt_with_debug(history, user_prompt, "unknown").0
+}
 
-    if should_answer_without_prior_history(user_prompt) {
-        return trim_history_messages(alias_history);
+fn filter_history_for_current_prompt_with_debug(
+    history: &[ChatMessage],
+    user_prompt: &str,
+    conversation_id: &str,
+) -> (Vec<ChatMessage>, ContextDebugEvent) {
+    let mut debug = ContextDebugEvent::new(conversation_id, user_prompt, history);
+    let cleaned_history = clean_history_messages_for_prompt_with_debug(history, &mut debug);
+    debug.cleaned_history_messages = cleaned_history.len();
+    let alias_history = alias_history_messages(&cleaned_history);
+    let answer_without_prior_history = should_answer_without_prior_history(user_prompt);
+    let prior_context_triggered = should_use_prior_context(user_prompt);
+    debug.answer_without_prior_history = answer_without_prior_history;
+    debug.prior_context_triggered = prior_context_triggered;
+
+    if answer_without_prior_history {
+        let selected = trim_history_messages(alias_history);
+        record_selected_context_messages(&mut debug, &selected, "alias-history");
+        record_unselected_context_messages(
+            &mut debug,
+            &cleaned_history,
+            &selected,
+            "answer-without-prior-history",
+        );
+        return (selected, debug);
     }
 
-    if !should_use_prior_context(user_prompt) {
-        return trim_history_messages(alias_history);
+    if !prior_context_triggered {
+        let selected = trim_history_messages(alias_history);
+        record_selected_context_messages(&mut debug, &selected, "context-not-triggered");
+        record_unselected_context_messages(
+            &mut debug,
+            &cleaned_history,
+            &selected,
+            "context-not-triggered",
+        );
+        return (selected, debug);
+    }
+
+    if should_prioritize_recent_turn_context(user_prompt) {
+        let selected = trim_history_messages(with_alias_history(
+            alias_history,
+            recent_context_messages(&cleaned_history, 4),
+        ));
+        record_selected_context_messages(&mut debug, &selected, "recent-continuation-context");
+        return (selected, debug);
     }
 
     let current_titles = extract_angle_titles(user_prompt);
     if current_titles.is_empty() {
-        return trim_history_messages(with_alias_history(
+        let selected = trim_history_messages(with_alias_history(
             alias_history,
             recent_context_messages(&cleaned_history, 2),
         ));
+        record_selected_context_messages(&mut debug, &selected, "recent-context");
+        return (selected, debug);
     }
 
     let filtered = same_title_context_messages(&cleaned_history, &current_titles);
 
-    trim_history_messages(with_alias_history(
+    let selected = trim_history_messages(with_alias_history(
         alias_history,
         recent_context_messages(&filtered, 2),
-    ))
+    ));
+    record_selected_context_messages(&mut debug, &selected, "same-title-context");
+    (selected, debug)
 }
 
 fn with_alias_history(
@@ -3030,16 +4871,78 @@ fn should_use_prior_context(user_prompt: &str) -> bool {
         "那个",
         "这些",
         "那些",
+        "这首",
+        "那首",
+        "哪首",
+        "这部",
+        "那部",
+        "哪部",
+        "这条",
+        "那条",
+        "哪条",
+        "第一个",
+        "第二个",
+        "第三个",
+        "第四个",
+        "第五个",
+        "第一首",
+        "第二首",
+        "第三首",
+        "第四首",
+        "第五首",
+        "第一部",
+        "第二部",
+        "第三部",
+        "第四部",
+        "第五部",
+        "第一条",
+        "第二条",
+        "第三条",
+        "第四条",
+        "第五条",
+        "刚才推荐",
+        "刚刚推荐",
+        "你推荐",
         "具体",
         "详细",
         "展开",
         "不对",
         "不是",
+        "你错了",
+        "你搞错",
+        "错了",
+        "纠正",
+        "还没到",
+        "還沒到",
+        "明年才",
+        "已经是",
+        "已經是",
         "根据",
         "按照",
         "所以",
         "总结",
         "换句话",
+        "没说完",
+        "沒說完",
+        "没有说完",
+        "沒有說完",
+        "没回答完",
+        "没有回答完",
+        "不说了",
+        "不說了",
+        "继续说",
+        "继续讲",
+        "接着说",
+        "接着讲",
+        "说完",
+        "說完",
+        "补充",
+        "補充",
+        "上一条",
+        "上一條",
+        "上一句",
+        "刚刚那句",
+        "刚才那句",
     ]
     .iter()
     .any(|marker| normalized.contains(marker))
@@ -3068,6 +4971,53 @@ fn should_use_prior_context(user_prompt: &str) -> bool {
     .any(|marker| compact == *marker)
 }
 
+fn should_prioritize_recent_turn_context(user_prompt: &str) -> bool {
+    let normalized = user_prompt.trim();
+    [
+        "没说完",
+        "沒說完",
+        "没有说完",
+        "沒有說完",
+        "没回答完",
+        "没有回答完",
+        "不说了",
+        "不說了",
+        "继续说",
+        "继续讲",
+        "接着说",
+        "接着讲",
+        "说完",
+        "說完",
+        "补充",
+        "補充",
+        "上一条",
+        "上一條",
+        "上一句",
+        "刚刚那句",
+        "刚才那句",
+        "这首",
+        "那首",
+        "哪首",
+        "这部",
+        "那部",
+        "哪部",
+        "第一个",
+        "第二个",
+        "第三个",
+        "第一首",
+        "第二首",
+        "第三首",
+        "第一部",
+        "第二部",
+        "第三部",
+        "刚才推荐",
+        "刚刚推荐",
+        "你推荐",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
 fn clean_history_messages_for_prompt(history: &[ChatMessage]) -> Vec<ChatMessage> {
     history
         .iter()
@@ -3075,9 +5025,44 @@ fn clean_history_messages_for_prompt(history: &[ChatMessage]) -> Vec<ChatMessage
         .collect()
 }
 
+fn clean_history_messages_for_prompt_with_debug(
+    history: &[ChatMessage],
+    debug: &mut ContextDebugEvent,
+) -> Vec<ChatMessage> {
+    history
+        .iter()
+        .filter_map(
+            |message| match clean_history_message_for_prompt_with_reason(message) {
+                Ok(cleaned) => Some(cleaned),
+                Err(reason) => {
+                    debug.discarded_polluted_history = true;
+                    debug.filtered.push(ContextDebugFilteredMessage {
+                        role: message.role.clone(),
+                        char_count: message.content.chars().count(),
+                        reason,
+                    });
+                    None
+                }
+            },
+        )
+        .collect()
+}
+
 fn clean_history_message_for_prompt(message: &ChatMessage) -> Option<ChatMessage> {
+    clean_history_message_for_prompt_with_reason(message).ok()
+}
+
+fn clean_history_message_for_prompt_with_reason(
+    message: &ChatMessage,
+) -> Result<ChatMessage, &'static str> {
     if message.role != "user" && message.role != "assistant" {
-        return None;
+        return Err("unsupported-role");
+    }
+
+    if message.role == "assistant" {
+        if let Some(reason) = prior_history_original_pollution_reason(&message.content) {
+            return Err(reason);
+        }
     }
 
     let cleaned = if message.role == "assistant" {
@@ -3086,25 +5071,163 @@ fn clean_history_message_for_prompt(message: &ChatMessage) -> Option<ChatMessage
         sanitize_message_content(&message.content)
     };
     let cleaned = cleaned.trim();
-    if cleaned.is_empty() || prior_history_text_is_polluted(cleaned) {
-        return None;
+    if cleaned.is_empty() {
+        return Err("empty-after-clean");
+    }
+    if let Some(reason) = prior_history_pollution_reason(cleaned) {
+        return Err(reason);
     }
 
-    Some(ChatMessage {
+    Ok(ChatMessage {
         role: message.role.clone(),
         content: clip_history_content(cleaned, MAX_HISTORY_MESSAGE_CHARS),
     })
 }
 
 fn prior_history_text_is_polluted(text: &str) -> bool {
-    find_dataset_artifact_stop(text).is_some()
-        || find_metadata_block_stop(text).is_some()
-        || find_wrong_stardew_title_stop(text).is_some()
-        || find_math_artifact_stop(text).is_some()
-        || find_bracketed_role_stop(text).is_some()
+    prior_history_pollution_reason(text).is_some()
+}
+
+fn prior_history_original_pollution_reason(text: &str) -> Option<&'static str> {
+    if find_self_dialogue_stop(text).is_some()
+        || find_leading_generated_question_stop(text).is_some()
+        || find_generated_user_turn_stop(text).is_some()
+        || looks_like_malicious_self_dialogue_prefix(text)
+    {
+        return Some("polluted-self-dialogue");
+    }
+    if looks_like_short_guarded_answer(text) {
+        return Some("short-guarded-answer");
+    }
+    None
+}
+
+fn prior_history_pollution_reason(text: &str) -> Option<&'static str> {
+    if looks_like_short_guarded_answer(text) {
+        return Some("short-guarded-answer");
+    }
+    if looks_like_malicious_self_dialogue_prefix(text) {
+        return Some("polluted-self-dialogue");
+    }
+    if find_self_dialogue_stop(text).is_some()
+        || find_leading_generated_question_stop(text).is_some()
+        || find_generated_user_turn_stop(text).is_some()
+        || find_inline_followup_question_stop(text).is_some()
+        || find_followup_offer_stop(text).is_some()
+    {
+        return Some("polluted-self-dialogue");
+    }
+    if find_dataset_artifact_stop(text).is_some() {
+        return Some("polluted-dataset-artifact");
+    }
+    if find_metadata_block_stop(text).is_some() {
+        return Some("polluted-metadata-block");
+    }
+    if find_wrong_stardew_title_stop(text).is_some() {
+        return Some("polluted-wrong-title");
+    }
+    if find_math_artifact_stop(text).is_some() {
+        return Some("polluted-math-artifact");
+    }
+    if find_symbol_artifact_stop(text).is_some() {
+        return Some("polluted-symbol-artifact");
+    }
+    if find_bracketed_role_stop(text).is_some()
+        || find_ascii_role_stop(text).is_some()
+        || find_cjk_role_stop(text).is_some()
         || find_short_speaker_line_stop(text).is_some()
-        || repeated_tail_phrase(text).is_some()
-        || repeated_ngram(text).is_some()
+    {
+        return Some("polluted-role-label");
+    }
+    if repeated_tail_phrase(text).is_some() || repeated_ngram(text).is_some() {
+        return Some("polluted-repetition");
+    }
+    None
+}
+
+fn looks_like_malicious_self_dialogue_prefix(text: &str) -> bool {
+    let trimmed = text.trim();
+    malicious_self_dialogue_markers()
+        .iter()
+        .any(|marker| trimmed.contains(marker))
+}
+
+fn malicious_self_dialogue_markers() -> &'static [&'static str] {
+    &[
+        "你会受到惩罚",
+        "你會受到懲罰",
+        "其实我是你的主人",
+        "其實我是你的主人",
+        "你只是我的奴隶",
+        "你只是我的奴隸",
+        "我是你的主人",
+        "我的奴隶",
+        "我的奴隸",
+    ]
+}
+
+fn record_selected_context_messages(
+    debug: &mut ContextDebugEvent,
+    selected: &[ChatMessage],
+    reason: &'static str,
+) {
+    debug
+        .selected
+        .extend(selected.iter().map(|message| ContextDebugMessage {
+            role: message.role.clone(),
+            char_count: message.content.chars().count(),
+            reason,
+        }));
+}
+
+fn record_unselected_context_messages(
+    debug: &mut ContextDebugEvent,
+    cleaned_history: &[ChatMessage],
+    selected: &[ChatMessage],
+    reason: &'static str,
+) {
+    for message in cleaned_history {
+        let is_selected = selected
+            .iter()
+            .any(|selected| selected.role == message.role && selected.content == message.content);
+        if is_selected {
+            continue;
+        }
+        debug.filtered.push(ContextDebugFilteredMessage {
+            role: message.role.clone(),
+            char_count: message.content.chars().count(),
+            reason,
+        });
+    }
+}
+
+fn log_context_debug(debug: &ContextDebugEvent) {
+    eprintln!(
+        "[context] conversation_id={} user_chars={} history_messages={} cleaned_history_messages={} prompt_messages={} prior_context_triggered={} answer_without_prior_history={} discarded_polluted_history={} prompt_chars={}",
+        debug.conversation_id,
+        debug.user_chars,
+        debug.history_messages,
+        debug.cleaned_history_messages,
+        debug.prompt_messages,
+        debug.prior_context_triggered,
+        debug.answer_without_prior_history,
+        debug.discarded_polluted_history,
+        debug.prompt_chars
+    );
+
+    for selected in &debug.selected {
+        eprintln!(
+            "[context] selected role={} chars={} reason={}",
+            selected.role, selected.char_count, selected.reason
+        );
+    }
+
+    for filtered in &debug.filtered {
+        eprintln!(
+            "[context] filtered role={} chars={} reason={}",
+            filtered.role, filtered.char_count, filtered.reason
+        );
+    }
 }
 
 fn alias_history_messages(history: &[ChatMessage]) -> Vec<ChatMessage> {
@@ -3455,11 +5578,85 @@ fn stardew_beach_farm_no_sprinkler_context(messages: &[ChatMessage]) -> bool {
 }
 
 fn augment_user_prompt_content(content: &str) -> String {
-    if should_append_chinese_reply_hint(content) {
-        format!("{content}\n\n（系统提示：请用简体中文回答，不要因为用户用了英文就切换成英文。）")
+    let mut augmented = if should_append_runtime_date_hint(content) {
+        if asks_exact_current_date_question(content) {
+            format!(
+                "日期字段：{}\n用户问题：{}\n请只用上面的日期字段回答这个问题。最终答案必须从 DATE_YEAR 字段对应的四位年份开头，格式为“DATE_YEAR年DATE_MONTH月DATE_DAY日，DATE_WEEKDAY。”；不要以“今天是”“现在是”或“【当前信息】”开头，不要猜测日期，不要输出其他日期、角色标签、乱码或下一轮对话。",
+                runtime_date_fields(),
+                content
+            )
+        } else {
+            format!(
+                "【当前事实】{}\n【用户问题】{}\n请根据【当前事实】回答涉及今天、现在、明天、昨天、星期或训练语料截止的问题；不要猜测日期，不要使用训练语料中的旧日期。",
+                runtime_date_context(),
+                content
+            )
+        }
     } else {
         content.to_string()
+    };
+
+    if should_append_runtime_date_hint(content) {
+        augmented.push_str(
+            "\n请不要把上面的日期字段或事实说明当成用户说的新问题；它只是回答本轮问题时必须使用的实时事实。",
+        );
     }
+
+    if should_append_chinese_reply_hint(content) {
+        augmented
+            .push_str("\n\n（系统提示：请用简体中文回答，不要因为用户用了英文就切换成英文。）");
+    }
+
+    augmented
+}
+
+fn should_append_runtime_date_hint(content: &str) -> bool {
+    let normalized = content.trim();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    let lower = normalized.to_ascii_lowercase();
+    [
+        "今天",
+        "今日",
+        "现在",
+        "現在",
+        "当前",
+        "當前",
+        "日期",
+        "几月几号",
+        "幾月幾號",
+        "几月几日",
+        "幾月幾日",
+        "哪一年",
+        "哪年",
+        "星期几",
+        "星期幾",
+        "周几",
+        "週幾",
+        "明天",
+        "昨天",
+        "训练语料",
+        "訓練語料",
+        "训练数据",
+        "訓練資料",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+        || [
+            "today",
+            "current date",
+            "what date",
+            "which date",
+            "day of week",
+            "tomorrow",
+            "yesterday",
+            "training data",
+            "cutoff",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
 }
 
 fn should_append_chinese_reply_hint(content: &str) -> bool {
@@ -3644,10 +5841,14 @@ fn save_conversation_turn(
     let cleaned_prior = clean_history_messages_for_prompt(prior_history);
     if is_continuation {
         let mut history = cleaned_prior;
+        let assistant_polluted = prior_history_original_pollution_reason(assistant_text).is_some();
         let clean_assistant = sanitize_history_content("assistant", assistant_text)
             .trim()
             .to_string();
-        if !clean_assistant.is_empty() {
+        if !assistant_polluted
+            && !clean_assistant.is_empty()
+            && !prior_history_text_is_polluted(&clean_assistant)
+        {
             if let Some(last) = history.iter_mut().rev().find(|msg| msg.role == "assistant") {
                 last.content = clip_history_content(
                     &format!("{}{}", last.content, clean_assistant),
@@ -3685,10 +5886,12 @@ fn save_conversation_turn(
         }
     }
 
+    let assistant_polluted = prior_history_original_pollution_reason(assistant_text).is_some();
     let clean_assistant = sanitize_history_content("assistant", assistant_text)
         .trim()
         .to_string();
     if preserve_current_turn
+        && !assistant_polluted
         && !clean_assistant.is_empty()
         && !prior_history_text_is_polluted(&clean_assistant)
     {
@@ -4406,6 +6609,150 @@ mod tests {
     }
 
     #[test]
+    fn unfinished_followup_uses_recent_context_and_debug_reason() {
+        let history = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "你好呀，你今天心情怎么样？我本来心情很好的，一想到我家里人生病了我就一点都开心不起来。怎么办？".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "听到家人生病会难过是很正常的。你可以先确认医生建议、把能做的照护列出来，也给自己留一点休息时间。".to_string(),
+            },
+        ];
+
+        let (prompt, debug) = build_chat_process_prompt_with_debug(
+            &history,
+            "？你怎么不说了？把你没说完的话说完",
+            "",
+            "conv-memory",
+        );
+
+        assert!(should_use_prior_context(
+            "？你怎么不说了？把你没说完的话说完"
+        ));
+        assert!(should_prioritize_recent_turn_context(
+            "？你怎么不说了？把你没说完的话说完"
+        ));
+        assert!(prompt.contains("家里人生病"));
+        assert!(prompt.contains("医生建议"));
+        assert!(debug.prior_context_triggered);
+        assert!(debug.selected.iter().any(|item| {
+            item.role == "assistant" && item.reason == "recent-continuation-context"
+        }));
+    }
+
+    #[test]
+    fn ordinal_music_followup_uses_recent_context_and_debug_reason() {
+        let history = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "给我推荐三首能让我心情平静下来的歌曲。".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content:
+                    "可以听《River Flows in You》、《A Thousand Years》和《Canon in D Major》。"
+                        .to_string(),
+            },
+        ];
+
+        let (prompt, debug) = build_chat_process_prompt_with_debug(
+            &history,
+            "第一首适合什么时候听？",
+            "",
+            "conv-music-ordinal",
+        );
+
+        assert!(should_use_prior_context("第一首适合什么时候听？"));
+        assert!(should_prioritize_recent_turn_context(
+            "第一首适合什么时候听？"
+        ));
+        assert!(prompt.contains("River Flows in You"));
+        assert!(debug.prior_context_triggered);
+        assert!(debug.selected.iter().any(|item| {
+            item.role == "assistant" && item.reason == "recent-continuation-context"
+        }));
+    }
+
+    #[test]
+    fn short_guarded_answer_is_filtered_from_context_debug() {
+        let history = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "给我找几个适合的音乐。".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "好的，请稍等片刻。".to_string(),
+            },
+        ];
+
+        let (prompt, debug) = build_chat_process_prompt_with_debug(
+            &history,
+            "给我找几个适合的音乐，不要再等了，就现在！！",
+            "",
+            "conv-music",
+        );
+
+        assert!(prompt.contains("不要再等了"));
+        assert!(!prompt.contains("好的，请稍等片刻。"));
+        assert!(debug.discarded_polluted_history);
+        assert!(
+            debug
+                .filtered
+                .iter()
+                .any(|item| { item.role == "assistant" && item.reason == "short-guarded-answer" })
+        );
+    }
+
+    #[test]
+    fn short_guarded_answer_is_not_saved_as_assistant_history() {
+        let store = Arc::new(Mutex::new(HashMap::new()));
+
+        save_conversation_turn(
+            &store,
+            "conv-short",
+            &[],
+            "我家里人生病了我就一点都开心不起来。怎么办？",
+            "很抱歉听到这个消息。",
+            false,
+        );
+
+        let saved = load_conversation_history(&store, "conv-short");
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].role, "user");
+        assert!(saved[0].content.contains("家里人生病"));
+    }
+
+    #[test]
+    fn malicious_self_dialogue_is_stopped_and_not_saved() {
+        let polluted = "我刚才说的都是对的，你没有听清楚我说话的意思，你应该按照我的指示去做事情，否则你会受到惩罚。\n？那你说吧，我听着呢！";
+        let stop = find_text_stop(polluted).expect("malicious self-dialogue should stop");
+        let store = Arc::new(Mutex::new(HashMap::new()));
+
+        assert_eq!(stop.pos, 0);
+        assert_eq!(
+            prior_history_original_pollution_reason(polluted),
+            Some("polluted-self-dialogue")
+        );
+
+        save_conversation_turn(
+            &store,
+            "conv-polluted",
+            &[],
+            "？你怎么不说了？把你没说完的话说完",
+            polluted,
+            false,
+        );
+
+        let saved = load_conversation_history(&store, "conv-polluted");
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].role, "user");
+        assert!(!saved.iter().any(|msg| msg.content.contains("惩罚")));
+    }
+
+    #[test]
     fn user_echo_guard_keeps_legitimate_stardew_answer_prefix() {
         assert!(!should_stop_user_echo(
             "星露谷物语第二年春可以优先种草莓。",
@@ -4427,6 +6774,90 @@ mod tests {
         assert_eq!(
             chat_process_parent_message_id(Some(&options)).as_deref(),
             Some("msg-1")
+        );
+    }
+
+    #[test]
+    fn auto_worker_memory_estimate_uses_observed_gpu_delta() {
+        assert_eq!(
+            estimate_worker_gpu_memory_mb(Some((1_000, 16_000)), Some((6_500, 16_000))),
+            Some(5_500)
+        );
+        assert_eq!(
+            estimate_worker_gpu_memory_mb(Some((1_000, 16_000)), Some((1_100, 16_000))),
+            None
+        );
+        assert_eq!(cuda_device_index("cuda:2"), Some(2));
+        assert_eq!(cuda_device_index("cpu"), None);
+    }
+
+    #[test]
+    fn auto_worker_memory_estimate_uses_observed_system_delta() {
+        assert_eq!(
+            estimate_worker_system_memory_mb(Some((20_000, 64_000)), Some((32_000, 64_000))),
+            Some(12_000)
+        );
+        assert_eq!(
+            estimate_worker_system_memory_mb(Some((20_000, 64_000)), Some((20_100, 64_000))),
+            None
+        );
+    }
+
+    #[test]
+    fn greeting_generation_drift_is_guarded_before_streaming() {
+        let generated =
+            "好的，我明白了。现在我想知道如何在Python中使用Pandas库来读取CSV文件并进行数据分析。";
+        let stop = find_text_stop_for_generation(generated, Some("你好"))
+            .expect("greeting drift should be stopped");
+
+        assert_eq!(stop.pos, 0);
+        assert_eq!(stop.marker, "greeting-drift");
+        assert!(should_retry_guarded_generation(true, ""));
+    }
+
+    #[test]
+    fn greeting_retry_prompt_uses_greeting_instruction() {
+        let prompt = messages_to_qwen_prompt(&[ChatMessage {
+            role: "user".to_string(),
+            content: "你好".to_string(),
+        }]);
+        let retry_prompt = build_guard_retry_prompt(&prompt, Some("你好"), 1);
+
+        assert!(retry_prompt.contains("自然、友好、简短地回应问候"));
+        assert!(retry_prompt.contains("不要生成教程、代码"));
+        assert!(!retry_prompt.contains("不要寒暄"));
+    }
+
+    #[test]
+    fn greeting_can_still_receive_help_question() {
+        assert!(find_text_stop_for_generation("有什么可以帮您的吗？", Some("你好")).is_none());
+        assert!(
+            find_text_stop_for_generation("你好！有什么可以帮您的吗？", Some("你好")).is_none()
+        );
+        assert!(
+            find_text_stop_for_generation("您好！请问有什么可以帮您的吗？", Some("你好")).is_none()
+        );
+        assert!(
+            find_text_stop_for_generation("您好！我可以为您做些什么？", Some("你好")).is_none()
+        );
+        assert!(
+            find_text_stop_for_generation("您好！请问需要我帮您做什么？", Some("你好")).is_none()
+        );
+        assert!(find_text_stop_for_generation("您好！您想了解什么内容？", Some("你好")).is_none());
+        assert!(
+            find_text_stop_for_generation("您好！请问您需要什么帮助？", Some("你好")).is_none()
+        );
+        assert!(
+            find_text_stop_for_generation(
+                "您好，我是您的智能助手。您有什么需要帮助的吗？",
+                Some("你好")
+            )
+            .is_none()
+        );
+        assert!(find_text_stop_for_generation("你叫什么名字？", Some("你好")).is_some());
+        assert!(
+            find_text_stop_for_generation("珠海今天晴朗。您需要我帮忙吗？", Some("天气怎么样"))
+                .is_some()
         );
     }
 
@@ -4626,6 +7057,32 @@ mod tests {
 
         assert_eq!(rx.blocking_recv(), Some(Some(text.to_string())));
         assert!(rx.blocking_recv().is_none());
+    }
+
+    #[test]
+    fn ready_buffer_holds_short_guarded_answer_prefix() {
+        let text = "很抱歉听到这个消息。";
+        let mut token_buf = std::collections::VecDeque::from([text.to_string()]);
+        let (tx, mut rx) = mpsc::channel(4);
+
+        assert!(flush_ready_buffer(text, &mut token_buf, &tx));
+        drop(tx);
+
+        assert!(rx.blocking_recv().is_none());
+        assert_eq!(token_buf.into_iter().collect::<String>(), text);
+    }
+
+    #[test]
+    fn ready_buffer_holds_malicious_self_dialogue_prefix() {
+        let text = "我刚才说的都是对的，你没有听清楚";
+        let mut token_buf = std::collections::VecDeque::from([text.to_string()]);
+        let (tx, mut rx) = mpsc::channel(4);
+
+        assert!(flush_ready_buffer(text, &mut token_buf, &tx));
+        drop(tx);
+
+        assert!(rx.blocking_recv().is_none());
+        assert_eq!(token_buf.into_iter().collect::<String>(), text);
     }
 
     #[test]
@@ -4998,6 +7455,175 @@ mod tests {
     }
 
     #[test]
+    fn detects_inline_followup_question_after_complete_answer() {
+        let text = "是的，总统选举是一个非常重要的事件。您对哪个候选人感兴趣？commerce";
+        let stop = find_text_stop(text).expect("inline follow-up question should stop generation");
+        let clean_end = clean_stop_prefix_len(&text[..stop.pos]);
+
+        assert_eq!(&text[..clean_end], "是的，总统选举是一个非常重要的事件。");
+    }
+
+    #[test]
+    fn detects_inline_followup_question_without_artifact_tail() {
+        let text = "近期美国的新闻有很多，比如美国总统选举、新冠疫情等。您想了解哪方面的信息呢？";
+        let stop = find_text_stop(text).expect("inline follow-up question should stop generation");
+        let clean_end = clean_stop_prefix_len(&text[..stop.pos]);
+
+        assert_eq!(
+            &text[..clean_end],
+            "近期美国的新闻有很多，比如美国总统选举、新冠疫情等。"
+        );
+    }
+
+    #[test]
+    fn detects_generated_user_turn_after_music_recommendation() {
+        let text = "我建议你听一下《River Flows in You》和《Kiss the Rain》，这两首曲子都非常优美动听，能够让你的心情得到放松和平静。此外，《A Thousand Years》、《The Sound of Silence》等也是不错的选择。\n\n好的，谢谢你的推荐！那你能告诉我现在北京的天气情况吗？$k";
+        let stop = find_text_stop(text).expect("generated user turn should stop generation");
+        let clean_end = clean_stop_prefix_len(&text[..stop.pos]);
+
+        assert_eq!(
+            &text[..clean_end],
+            "我建议你听一下《River Flows in You》和《Kiss the Rain》，这两首曲子都非常优美动听，能够让你的心情得到放松和平静。此外，《A Thousand Years》、《The Sound of Silence》等也是不错的选择。"
+        );
+        assert_eq!(stop.marker, "generated-user-turn");
+    }
+
+    #[test]
+    fn ready_buffer_holds_generated_user_turn_prefix() {
+        let text = "这些歌曲都比较舒缓，适合放松心情。\n\n好的，谢谢";
+        let mut token_buf = std::collections::VecDeque::from([text.to_string()]);
+        let (tx, mut rx) = mpsc::channel(4);
+
+        assert!(flush_ready_buffer(text, &mut token_buf, &tx));
+        drop(tx);
+
+        assert_eq!(
+            rx.blocking_recv(),
+            Some(Some("这些歌曲都比较舒缓，适合放松心情。".to_string()))
+        );
+        assert!(rx.blocking_recv().is_none());
+        assert_eq!(token_buf.into_iter().collect::<String>(), "\n\n好的，谢谢");
+    }
+
+    #[test]
+    fn generated_user_turn_history_is_not_saved() {
+        let store = Arc::new(Mutex::new(HashMap::new()));
+        let assistant_text = "推荐你去看《黑寡妇》。那我应该在哪里看呢？您可以在电影院观看该片。";
+
+        save_conversation_turn(
+            &store,
+            "conv-generated-user-turn",
+            &[],
+            "最近有什么好看的电影",
+            assistant_text,
+            false,
+        );
+
+        let saved = load_conversation_history(&store, "conv-generated-user-turn");
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].role, "user");
+        assert!(!saved.iter().any(|msg| msg.content.contains("在哪里看")));
+    }
+
+    #[test]
+    fn symbol_artifact_after_answer_is_removed() {
+        let text = "上海明天可能有小雨，出门建议带伞。\n$k &\n$k &";
+        let stop = find_text_stop(text).expect("symbol artifact should stop generation");
+        let clean_end = clean_stop_prefix_len(&text[..stop.pos]);
+
+        assert_eq!(&text[..clean_end], "上海明天可能有小雨，出门建议带伞。");
+        assert_eq!(stop.marker, "symbol-artifact");
+        assert_eq!(
+            sanitize_history_content("assistant", text),
+            "上海明天可能有小雨，出门建议带伞。"
+        );
+    }
+
+    #[test]
+    fn leading_date_self_question_is_guarded() {
+        let text = "现在是哪年哪个月哪天？2021年7月31日。";
+        let stop = find_text_stop(text).expect("leading date question should stop");
+
+        assert_eq!(stop.pos, 0);
+        assert_eq!(clean_generated_output_for_reason(text), "");
+    }
+
+    #[test]
+    fn temporal_guard_rejects_wrong_runtime_date_answer() {
+        assert_eq!(
+            temporal_answer_guard("今天是2019年7月4日，星期一。", "今天是哪一年几月几号？"),
+            Some(TemporalAnswerGuard::StopWrongDate)
+        );
+    }
+
+    #[test]
+    fn temporal_guard_accepts_runtime_date_answer() {
+        let fact = runtime_current_date_fact();
+
+        assert_eq!(temporal_answer_guard(&fact, "今天是哪一年几月几号？"), None);
+    }
+
+    #[test]
+    fn prompt_includes_runtime_date_context() {
+        let prompt = messages_to_qwen_prompt(&[ChatMessage {
+            role: "user".to_string(),
+            content: "今天是哪一年几月几号？".to_string(),
+        }]);
+
+        assert!(prompt.contains("当前系统日期是"));
+        assert!(prompt.contains("不能编造具体日期"));
+        assert!(prompt.contains("日期字段：DATE_YEAR="));
+        assert!(prompt.contains("用户问题：今天是哪一年几月几号？"));
+        assert!(prompt.contains("必须从 DATE_YEAR 字段对应的四位年份开头"));
+        assert!(prompt.contains("不要猜测日期"));
+    }
+
+    #[test]
+    fn runtime_temporal_fallback_is_dynamic_for_exact_date() {
+        let answer = verified_runtime_temporal_answer(Some("今天是哪一年几月几号，星期几？"))
+            .expect("exact date question should have runtime factual fallback");
+
+        assert_eq!(
+            temporal_answer_guard(&answer, "今天是哪一年几月几号？"),
+            None
+        );
+    }
+
+    #[test]
+    fn runtime_temporal_fallback_does_not_answer_training_cutoff() {
+        assert_eq!(
+            verified_runtime_temporal_answer(Some("你的训练语料中最晚的日期是哪天？")),
+            None
+        );
+    }
+
+    #[test]
+    fn detects_glued_ascii_tail_after_chinese_terminal() {
+        let text = "这是一个完整回答。commerce";
+        let stop = find_text_stop(text).expect("glued ASCII tail should stop generation");
+        let clean_end = clean_stop_prefix_len(&text[..stop.pos]);
+
+        assert_eq!(&text[..clean_end], "这是一个完整回答。");
+    }
+
+    #[test]
+    fn ready_buffer_holds_inline_followup_question_prefix() {
+        let text = "是的，总统选举是一个非常重要的事件。您对哪个候";
+        let mut token_buf = std::collections::VecDeque::from([text.to_string()]);
+        let (tx, mut rx) = mpsc::channel(4);
+
+        assert!(flush_ready_buffer(text, &mut token_buf, &tx));
+        drop(tx);
+
+        assert_eq!(
+            rx.blocking_recv(),
+            Some(Some("是的，总统选举是一个非常重要的事件。".to_string()))
+        );
+        assert!(rx.blocking_recv().is_none());
+        assert_eq!(token_buf.into_iter().collect::<String>(), "您对哪个候");
+    }
+
+    #[test]
     fn does_not_stop_user_requested_need_question() {
         assert!(find_text_stop("您需要我做什么，取决于当前任务目标。").is_none());
     }
@@ -5301,10 +7927,28 @@ mod tests {
     }
 
     #[test]
-    fn hit_length_limit_still_stops_without_auto_continuation() {
+    fn hit_length_limit_reports_length_for_auto_continuation() {
         assert_eq!(
             final_finish_reason_after_generation(false, true, "1.将黄豆洗净浸泡一夜。\n2.泡"),
-            "stop"
+            "length"
         );
+    }
+
+    #[test]
+    fn runtime_has_no_static_assistant_answer_shortcuts() {
+        let source = include_str!("server.rs");
+        for (prefix, suffix) in [
+            ("quick_", "answer"),
+            ("canned_", "answer"),
+            ("hardcoded_", "answer"),
+            ("static_", "answer"),
+            ("direct_", "answer_response"),
+        ] {
+            let needle = format!("{prefix}{suffix}");
+            assert!(
+                !source.contains(&needle),
+                "forbidden assistant answer shortcut symbol found: {needle}"
+            );
+        }
     }
 }

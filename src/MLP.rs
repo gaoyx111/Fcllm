@@ -6,7 +6,7 @@ use candle_nn::Activation;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Qwen2MoeMLP {
     pub device: Device,
     pub layer_idx: usize,

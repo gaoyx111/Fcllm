@@ -1,6 +1,6 @@
 use candle_core::{DType, Device, Error, Result, Tensor};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Embedding {
     pub weight: Tensor,
     pub padding_idx: Option<usize>,
