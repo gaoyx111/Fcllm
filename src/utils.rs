@@ -3,6 +3,10 @@ use candle_core::{DType, Error, Result, Tensor};
 use nvml_wrapper::Nvml;
 use std::collections::HashMap;
 
+const CPU_DEQUANT_CACHE_MIN_FREE_SYSTEM_MB: usize = 4 * 1024;
+const AUTO_MIN_ONE_LAYER_CACHE_FREE_GPU_MB: f64 = 5_200.0;
+const AUTO_MIN_TWO_LAYER_CACHE_FREE_GPU_MB: f64 = 5_900.0;
+
 pub fn pack_8bit_u8(w_q: &Tensor) -> Result<Tensor> {
     w_q.to_dtype(DType::U8)
 }
@@ -276,13 +280,69 @@ pub fn get_gpu_memory_usage(device_id: u32) -> Result<(usize, usize)> {
     Ok((mem_info.used as usize / MB, mem_info.total as usize / MB))
 }
 
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct MemoryStatusEx {
+    dw_length: u32,
+    dw_memory_load: u32,
+    ull_total_phys: u64,
+    ull_avail_phys: u64,
+    ull_total_page_file: u64,
+    ull_avail_page_file: u64,
+    ull_total_virtual: u64,
+    ull_avail_virtual: u64,
+    ull_avail_extended_virtual: u64,
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" {
+    fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+pub fn system_memory_usage_mb() -> Option<(usize, usize)> {
+    let mut status = MemoryStatusEx {
+        dw_length: std::mem::size_of::<MemoryStatusEx>() as u32,
+        dw_memory_load: 0,
+        ull_total_phys: 0,
+        ull_avail_phys: 0,
+        ull_total_page_file: 0,
+        ull_avail_page_file: 0,
+        ull_total_virtual: 0,
+        ull_avail_virtual: 0,
+        ull_avail_extended_virtual: 0,
+    };
+
+    let ok = unsafe { GlobalMemoryStatusEx(&mut status as *mut MemoryStatusEx) };
+    if ok == 0 || status.ull_total_phys == 0 {
+        return None;
+    }
+
+    let total_mb = (status.ull_total_phys as usize) / MB;
+    let free_mb = (status.ull_avail_phys as usize) / MB;
+    Some((total_mb.saturating_sub(free_mb), total_mb))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn system_memory_usage_mb() -> Option<(usize, usize)> {
+    None
+}
+
+pub fn cpu_dequant_cache_has_memory_headroom() -> bool {
+    let Some((used_mb, total_mb)) = system_memory_usage_mb() else {
+        return true;
+    };
+    total_mb.saturating_sub(used_mb) > CPU_DEQUANT_CACHE_MIN_FREE_SYSTEM_MB
+}
+
 pub fn memory_cost_qwen(
     config: &Qwen2MoeConfig,
     memory_budget: usize,
 ) -> (HashMap<usize, usize>, HashMap<usize, usize>) {
     let mb_f64 = MB as f64;
 
-    let memory_budget = if memory_budget == 0 {
+    let auto_memory_budget = memory_budget == 0;
+    let memory_budget = if auto_memory_budget {
         let device_id = 0u32;
         match get_gpu_memory_usage(device_id) {
             Ok((used_mb, total_mb)) => {
@@ -312,7 +372,6 @@ pub fn memory_cost_qwen(
     let num_heads = config.num_attention_heads as f64;
     let head_dim = hidden_size / num_heads;
     let num_key_value_heads = config.num_key_value_heads as f64;
-    let max_position_embeddings = config.max_position_embeddings as f64;
 
     let embed = (vocab_size * hidden_size * 2.0 * 2.0) / mb_f64;
     let attention = (2.0
@@ -323,9 +382,7 @@ pub fn memory_cost_qwen(
     let attn_bias =
         ((num_heads * head_dim + 2.0 * num_key_value_heads * head_dim) * num_hidden_layers * 2.0)
             / mb_f64;
-    let rotary_embedding =
-        ((head_dim / 2.0 + head_dim * max_position_embeddings * 2.0) * num_hidden_layers * 4.0)
-            / mb_f64;
+    let rotary_embedding = shared_rotary_embedding_cache_mb(config);
     let norm = ((2.0 * hidden_size * num_hidden_layers + hidden_size) * 2.0) / mb_f64;
 
     let shared_expert = (3.0 * hidden_size * shared_expert_intermediate_size * 2.0) / mb_f64;
@@ -348,21 +405,15 @@ pub fn memory_cost_qwen(
         - kv
         - hidden;
 
-    available_memory -= shared_expert * 24.0;
+    available_memory -= shared_expert * config.num_hidden_layers as f64;
 
-    let meta_data = 0.3 * (3.0 * 60.0 + 3.0 + 4.0 + 2.0 + 2.0 + 2.0) * 24.0;
+    let meta_data = 0.3
+        * (3.0 * config.num_experts as f64 + 3.0 + 4.0 + 2.0 + 2.0 + 2.0)
+        * config.num_hidden_layers as f64;
     available_memory = available_memory - meta_data - 1000.0;
-
-    if available_memory < 0.0 {
-        panic!(
-            "Memory not enough for dense inference: available_memory = {}",
-            available_memory
-        );
-    }
 
     let zero_scale = (2.0 * (moe_intermediate_size / 64.0 * hidden_size) * 1.0 * 4.0) / mb_f64;
     let expert_int4 = expert / 4.0 + 3.0 * zero_scale;
-
     let mut quan_map: HashMap<usize, usize> = HashMap::new();
     let mut offload_map: HashMap<usize, usize> = HashMap::new();
 
@@ -371,11 +422,30 @@ pub fn memory_cost_qwen(
         offload_map.insert(i, 0);
     }
 
-    if available_memory > num_hidden_layers * 60.0 * expert {
+    if available_memory < 0.0 {
+        let minimum_resident_layers =
+            minimum_auto_resident_cache_layers(auto_memory_budget, memory_budget, config);
+        eprintln!(
+            "[memory] available expert memory is negative ({available_memory:.2} MB); preserving {minimum_resident_layers} early layer(s) for ARC expert cache"
+        );
+        for i in 0..config.num_hidden_layers {
+            quan_map.insert(i, 4);
+            if i < minimum_resident_layers {
+                offload_map.insert(i, 0);
+            } else {
+                offload_map.insert(i, config.num_experts);
+            }
+        }
         return (offload_map, quan_map);
-    } else if available_memory > num_hidden_layers * 60.0 * expert_int4 {
-        let remain = available_memory - num_hidden_layers * 60.0 * expert_int4;
-        let fp16_layers = (remain / (60.0 * (expert - expert_int4))) as usize;
+    }
+
+    let planned_layers = config.num_hidden_layers as f64;
+
+    if available_memory > planned_layers * num_experts * expert {
+        return (offload_map, quan_map);
+    } else if available_memory > planned_layers * num_experts * expert_int4 {
+        let remain = available_memory - planned_layers * num_experts * expert_int4;
+        let fp16_layers = (remain / (num_experts * (expert - expert_int4))) as usize;
 
         for i in 0..config.num_hidden_layers {
             if i >= fp16_layers {
@@ -385,30 +455,113 @@ pub fn memory_cost_qwen(
         return (offload_map, quan_map);
     } else {
         let cache_num = (available_memory / expert_int4) as usize;
-        let all_cache_layers = cache_num / 60;
+        let all_cache_layers = cache_num / config.num_experts;
+        let partial_cache = cache_num.saturating_sub(config.num_experts * all_cache_layers);
 
         if all_cache_layers < 4 {
             for i in 0..config.num_hidden_layers {
                 quan_map.insert(i, 4);
                 if i < all_cache_layers {
                     offload_map.insert(i, 0);
-                } else if i == all_cache_layers {
-                    offload_map.insert(i, 60 - (cache_num - 60 * all_cache_layers));
+                } else if i == all_cache_layers && partial_cache > 0 {
+                    offload_map.insert(i, config.num_experts - partial_cache);
                 } else {
-                    offload_map.insert(i, 60);
+                    offload_map.insert(i, config.num_experts);
                 }
             }
         } else {
-            let cache_deep = (cache_num - 4 * 60) / (config.num_hidden_layers - 4);
+            let tail_layers = config.num_hidden_layers.saturating_sub(4).max(1);
+            let cache_deep =
+                ((cache_num - 4 * config.num_experts) / tail_layers).min(config.num_experts);
             for i in 0..config.num_hidden_layers {
                 quan_map.insert(i, 4);
                 if i < 4 {
                     offload_map.insert(i, 0);
                 } else {
-                    offload_map.insert(i, 60 - cache_deep);
+                    offload_map.insert(i, config.num_experts - cache_deep);
                 }
             }
         }
         return (offload_map, quan_map);
+    }
+}
+
+fn shared_rotary_embedding_cache_mb(config: &Qwen2MoeConfig) -> f64 {
+    let head_dim = config.hidden_size as f64 / config.num_attention_heads as f64;
+    ((head_dim / 2.0 + head_dim * config.max_position_embeddings as f64 * 2.0) * 4.0) / MB as f64
+}
+
+fn minimum_auto_resident_cache_layers(
+    auto_memory_budget: bool,
+    free_gpu_mb: f64,
+    config: &Qwen2MoeConfig,
+) -> usize {
+    if !auto_memory_budget {
+        return 0;
+    }
+
+    let layers = if free_gpu_mb >= AUTO_MIN_TWO_LAYER_CACHE_FREE_GPU_MB {
+        2
+    } else if free_gpu_mb >= AUTO_MIN_ONE_LAYER_CACHE_FREE_GPU_MB {
+        1
+    } else {
+        0
+    };
+
+    layers.min(config.num_hidden_layers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_planner_can_quantize_layer0_when_budget_is_tight() {
+        let config = Qwen2MoeConfig::new();
+        let (offload_map, quan_map) = memory_cost_qwen(&config, 8);
+
+        assert_eq!(quan_map.get(&0), Some(&4));
+        assert!(offload_map[&0] <= config.num_experts);
+        assert_eq!(quan_map.len(), config.num_hidden_layers);
+        assert_eq!(offload_map.len(), config.num_hidden_layers);
+    }
+
+    #[test]
+    fn auto_memory_planner_keeps_small_resident_cache_when_formula_is_pessimistic() {
+        let config = Qwen2MoeConfig::new();
+
+        assert_eq!(
+            minimum_auto_resident_cache_layers(true, 6_500.0, &config),
+            2
+        );
+        assert_eq!(
+            minimum_auto_resident_cache_layers(true, 6_100.0, &config),
+            2
+        );
+        assert_eq!(
+            minimum_auto_resident_cache_layers(true, 5_600.0, &config),
+            1
+        );
+        assert_eq!(
+            minimum_auto_resident_cache_layers(true, 5_000.0, &config),
+            0
+        );
+        assert_eq!(
+            minimum_auto_resident_cache_layers(false, 8_000.0, &config),
+            0
+        );
+    }
+
+    #[test]
+    fn shared_rotary_budget_does_not_scale_with_layer_count() {
+        let mut small = Qwen2MoeConfig::new();
+        small.num_hidden_layers = 1;
+        let mut large = small.clone();
+        large.num_hidden_layers = 24;
+
+        assert_eq!(
+            shared_rotary_embedding_cache_mb(&small),
+            shared_rotary_embedding_cache_mb(&large)
+        );
     }
 }

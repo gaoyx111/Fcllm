@@ -1,5 +1,5 @@
 use crate::Cache::Cache;
-use crate::RotaryEmbedding::{Qwen2MoeRotaryEmbedding, apply_rotary_pos_emb, repeat_kv};
+use crate::RotaryEmbedding::{Qwen2MoeRotaryEmbedding, apply_rotary_pos_emb_positioned, repeat_kv};
 use crate::configuration_qwen::Qwen2MoeConfig;
 use crate::linear::new_uninitialized_linear;
 use crate::load::load_linear_from_files;
@@ -33,6 +33,22 @@ pub struct Qwen2MoeAttention {
 
 impl Qwen2MoeAttention {
     pub fn new(cfg: &Qwen2MoeConfig, layer_idx: Option<usize>) -> Result<Self> {
+        let head_dim = cfg.hidden_size / cfg.num_attention_heads;
+        let rotary_emb = Arc::new(Qwen2MoeRotaryEmbedding::new(
+            head_dim,
+            cfg.max_position_embeddings,
+            cfg.rope_theta,
+            DType::F32,
+            &cfg.device,
+        )?);
+        Self::new_with_rotary(cfg, layer_idx, rotary_emb)
+    }
+
+    pub fn new_with_rotary(
+        cfg: &Qwen2MoeConfig,
+        layer_idx: Option<usize>,
+        rotary_emb: Arc<Qwen2MoeRotaryEmbedding>,
+    ) -> Result<Self> {
         let hidden_sz = cfg.hidden_size;
         let num_heads = cfg.num_attention_heads;
         let num_kv_heads = cfg.num_key_value_heads;
@@ -53,14 +69,6 @@ impl Qwen2MoeAttention {
         let v_proj =
             new_uninitialized_linear(hidden_sz, num_kv_heads * head_dim, true, &cfg.device)?;
         let o_proj = new_uninitialized_linear(num_heads * head_dim, hidden_sz, false, &cfg.device)?;
-
-        let rotary_emb = Arc::new(Qwen2MoeRotaryEmbedding::new(
-            head_dim,
-            cfg.max_position_embeddings,
-            cfg.rope_theta,
-            DType::F32,
-            &cfg.device,
-        )?);
 
         Ok(Self {
             q_proj,
@@ -146,26 +154,32 @@ impl Qwen2MoeAttention {
                     std::any::type_name::<Self>()
                 ))
             })?;
-            let cached_len = cache.kvs[layer_idx]
-                .as_ref()
-                .map_or(0, |(k, _)| k.dim(2).unwrap_or(0));
+            let cached_len = cache.get_usable_length(layer_idx, q_len)?;
             q_len + cached_len
         } else {
             q_len
         };
-        let (cos, sin) =
-            self.rotary_emb
-                .forward(kv_seq_len, value_states.dtype(), value_states.device())?;
+        let (cos, sin) = if q_len == 1 && position_ids.is_none() {
+            self.rotary_emb.forward_single_position(
+                kv_seq_len,
+                kv_seq_len - 1,
+                value_states.dtype(),
+                value_states.device(),
+                1,
+            )?
+        } else {
+            self.rotary_emb.forward_positioned(
+                kv_seq_len,
+                position_ids.unwrap(),
+                value_states.dtype(),
+                value_states.device(),
+                1,
+            )?
+        };
 
         // 3. apply RoPE
-        let (query_states, key_states) = apply_rotary_pos_emb(
-            &query_states,
-            &key_states,
-            &cos,
-            &sin,
-            position_ids.unwrap(),
-            1,
-        )?;
+        let (query_states, key_states) =
+            apply_rotary_pos_emb_positioned(&query_states, &key_states, &cos, &sin)?;
 
         // 4. 更新 Cache
         let (key_states, value_states) = if let Some(ref mut cache) = past_key_value {
@@ -173,8 +187,6 @@ impl Qwen2MoeAttention {
                 &key_states,
                 &value_states,
                 self.layer_idx.unwrap(),
-                &sin,
-                &cos,
                 cache_position,
             )?
         } else {
@@ -189,7 +201,6 @@ impl Qwen2MoeAttention {
         // .contiguous() is required on CUDA — transpose/expand only changes strides without moving data
         let query_f32 = query_states.to_dtype(DType::F32)?.contiguous()?;
         let key_f32 = key_states.to_dtype(DType::F32)?.contiguous()?;
-        let value_f32 = value_states.to_dtype(DType::F32)?.contiguous()?;
 
         let scale = 1.0f64 / (self.head_dim as f64).sqrt();
         let attn_weights = query_f32
@@ -215,13 +226,14 @@ impl Qwen2MoeAttention {
         // 8. Softmax + matmul all in F32, then cast back to original dtype at the end
         let attn_weights =
             candle_nn::ops::softmax(&attn_weights, candle_core::D::Minus1)?.contiguous()?;
+        let value_f32 = value_states.to_dtype(DType::F32)?.contiguous()?;
         let attn_output = attn_weights.matmul(&value_f32)?;
-
-        let attn_output = attn_output
-            .to_dtype(query_states.dtype())?
-            .transpose(1, 2)?
-            .contiguous()?
-            .reshape((bsz, q_len, self.hidden_size))?;
+        let attn_output = attn_output.to_dtype(query_states.dtype())?;
+        let attn_output =
+            attn_output
+                .transpose(1, 2)?
+                .contiguous()?
+                .reshape((bsz, q_len, self.hidden_size))?;
         let attn_output = self.o_proj.forward(&attn_output)?;
 
         Ok((attn_output, past_key_value))

@@ -3,12 +3,16 @@ use crate::configuration_qwen::Qwen2MoeConfig;
 use crate::expert_ARC_cahce::ARC_Cache;
 use crate::linear::new_uninitialized_linear;
 use crate::load::load_linear_from_files;
-use candle_core::{D, DType, Device, Result, Tensor};
-use candle_nn::encoding::one_hot;
+use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::{Linear, Module};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::hash_map::Entry;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::Instant;
+
+const MIN_DEQUANT_CACHE_FOR_FULLY_OFFLOADED_LAYER: usize = 2;
 
 #[derive(Debug, Clone)]
 pub struct Qwen2MoeSparseMoeBlock {
@@ -31,7 +35,9 @@ impl Qwen2MoeSparseMoeBlock {
         let top_k = cfg.num_experts_per_tok;
         let norm_topk_prob = cfg.norm_topk_prob;
         let device = cfg.device.clone();
-        let num_in_mem = num_experts - cfg.offload_map[&layer_idx];
+        let compressed_num_in_mem = num_experts - cfg.offload_map[&layer_idx];
+        let expert_quan_bit = cfg.quan_map[&layer_idx];
+        let num_in_mem = dequant_cache_capacity(compressed_num_in_mem, expert_quan_bit);
 
         let arc_cache = ARC_Cache::new(num_in_mem);
 
@@ -40,7 +46,7 @@ impl Qwen2MoeSparseMoeBlock {
 
         // experts 逐个 new Qwen2MoeMLP
         let mut experts = Vec::with_capacity(num_experts);
-        for idx in 0..num_experts {
+        for _ in 0..num_experts {
             let expert = Qwen2MoeMLP::new(cfg, layer_idx, false);
             experts.push(expert);
         }
@@ -99,6 +105,16 @@ impl Qwen2MoeSparseMoeBlock {
         Ok(())
     }
 
+    pub fn prewarm_cpu_dequant_cache(&mut self) -> Result<usize> {
+        let mut warmed = 0;
+        for expert in &mut self.experts {
+            if expert.warm_dequant_cpu_cache()? {
+                warmed += 1;
+            }
+        }
+        Ok(warmed)
+    }
+
     pub fn load_weights(
         &mut self,
         idx: Idx,
@@ -131,11 +147,9 @@ impl Qwen2MoeSparseMoeBlock {
     pub fn post_comp(&mut self, expert_idx: usize) -> Result<()> {
         if self.num_in_mem == 0 {
             self.experts[expert_idx].clear();
-        } else if self.layer_idx != 0 {
+        } else {
             if self.arc_cache.is_evicted(expert_idx) {
                 self.experts[expert_idx].clear();
-            } else {
-                self.experts[expert_idx].quan_experts()?;
             }
         }
         Ok(())
@@ -151,9 +165,25 @@ impl Qwen2MoeSparseMoeBlock {
 
         // gate score & top-k
         let router_logits = self.gate.forward(&hidden_states)?; // shape: (B*S, n_experts)
+
+        if batch_size * seq_len == 1 && prefetch_expert_idx.is_none() {
+            let (routing_weights, expert_ids) =
+                topk_routing_single_token(&router_logits, self.top_k, self.norm_topk_prob)?;
+            let final_hidden_states =
+                self.forward_single_token(&hidden_states, &routing_weights, &expert_ids)?;
+            let shared_expert_out = self.shared_expert.forward(&hidden_states)?;
+            let gate_out =
+                candle_nn::ops::sigmoid(&self.shared_expert_gate.forward(&hidden_states)?)?;
+            let shared = shared_expert_out.broadcast_mul(&gate_out)?;
+
+            let output = (final_hidden_states + shared)?;
+            return output.reshape(&[batch_size, seq_len, hidden_dim]);
+        }
+
         let (routing_weights, selected_experts) =
             topk_routing(&router_logits, self.top_k, self.norm_topk_prob)?;
         let routing_weights = routing_weights.to_dtype(hidden_states.dtype())?;
+        let selected_experts = selected_experts.to_dtype(DType::I64)?;
 
         let mut final_hidden_states = Tensor::zeros(
             &[batch_size * seq_len, hidden_dim],
@@ -161,75 +191,46 @@ impl Qwen2MoeSparseMoeBlock {
             hidden_states.device(),
         )?;
 
-        let selected_experts = selected_experts.to_dtype(DType::I64)?;
-        let one_hot_encoded = one_hot(
-            selected_experts.clone(),
-            self.num_experts,
-            1f32, // on_value
-            0f32, // off_value
-        )?; // shape: [bsz*seqlen*top_k, num_experts]
-        let selected_shape = selected_experts.dims(); // [bsz*seqlen, top_k]
-        let mut expert_mask = one_hot_encoded.reshape(&[
-            selected_shape[0], // bsz*seqlen
-            selected_shape[1], // top_k
-            self.num_experts,
-        ])?; // [bsz*seqlen, top_k, num_experts]
-        expert_mask = expert_mask.permute((2, 1, 0))?;
-
-        let expert_index: Vec<usize> = selected_experts
-            .flatten_all()?
-            .to_vec1::<i64>()?
-            .into_iter()
-            .map(|x| x as usize)
-            .collect();
+        let (assignments_by_expert, expert_index, expert_order) =
+            build_expert_assignments(&selected_experts)?;
         let mut load_experts = vec![];
+        let using_external_prefetch = prefetch_expert_idx.is_some();
 
         let prefetch_expert_idx = match prefetch_expert_idx {
             Some(v) => v.to_vec(),
-            None => {
-                let unique: HashSet<_> = expert_index.iter().copied().collect();
-                unique.into_iter().collect()
-            }
+            None => expert_order,
         };
 
-        if self.layer_idx == 0 || prefetch_expert_idx.is_empty() {
-            // do nothing extra
-        } else {
-            let mut counter = HashMap::new();
-            for &idx in &expert_index {
-                *counter.entry(idx).or_insert(0usize) += 1;
-            }
-            let mut freq_counter: Vec<_> = counter.into_iter().collect();
-            freq_counter.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
-
-            for (idx, _) in freq_counter {
-                if !prefetch_expert_idx.contains(&idx) {
-                    self.load_weights(Idx::Single(idx), true, None)?; // is_now=true
+        if using_external_prefetch {
+            let prefetched: HashSet<usize> = prefetch_expert_idx.iter().copied().collect();
+            for &idx in assignments_by_expert.keys() {
+                if !prefetched.contains(&idx) {
+                    self.load_weights(Idx::Single(idx), true, None)?;
                     load_experts.push(idx);
                 }
             }
+        }
 
-            if self.num_in_mem != 0 {
-                let evicted = self.arc_cache.update_list(&expert_index);
-                for idx in evicted {
-                    self.experts[idx].clear();
-                }
+        if self.num_in_mem != 0 {
+            let evicted = self.arc_cache.update_list(&expert_index);
+            for idx in evicted {
+                self.experts[idx].clear();
             }
         }
 
         // Run computation for prefetched experts
         for &expert_idx in &prefetch_expert_idx {
-            if !expert_index.contains(&expert_idx) {
+            let Some(assignments) = assignments_by_expert.get(&expert_idx) else {
                 if self.arc_cache.is_evicted(expert_idx) {
                     self.experts[expert_idx].clear();
                 }
                 continue;
-            }
+            };
 
             self.experts[expert_idx].dequan_experts()?;
             let expert_layer = &mut self.experts[expert_idx];
 
-            let (idx, top_x) = index_positions(&expert_mask, expert_idx)?;
+            let (idx, top_x) = split_expert_assignments(assignments);
             let n_tokens = top_x.len();
             let current_state = select(&hidden_states, &top_x)?;
 
@@ -262,7 +263,10 @@ impl Qwen2MoeSparseMoeBlock {
                 self.experts[expert_idx].dequan_experts()?;
                 let expert_layer = &mut self.experts[expert_idx];
 
-                let (idx, top_x) = index_positions(&expert_mask, expert_idx)?;
+                let Some(assignments) = assignments_by_expert.get(&expert_idx) else {
+                    continue;
+                };
+                let (idx, top_x) = split_expert_assignments(assignments);
                 let n_tokens = top_x.len();
                 let current_state = select(&hidden_states, &top_x)?;
 
@@ -294,11 +298,59 @@ impl Qwen2MoeSparseMoeBlock {
         // shared expert
         let shared_expert_out = self.shared_expert.forward(&hidden_states)?;
         let gate_out = candle_nn::ops::sigmoid(&self.shared_expert_gate.forward(&hidden_states)?)?;
-        let gate_out = gate_out.broadcast_as(shared_expert_out.shape())?;
-        let shared = (gate_out * shared_expert_out)?;
+        let shared = shared_expert_out.broadcast_mul(&gate_out)?;
 
         let output = (final_hidden_states + shared)?;
         output.reshape(&[batch_size, seq_len, hidden_dim])
+    }
+
+    fn forward_single_token(
+        &mut self,
+        hidden_states: &Tensor,
+        routing_weights: &[f32],
+        expert_ids: &[usize],
+    ) -> Result<Tensor> {
+        if self.num_in_mem != 0 {
+            let evicted = self.arc_cache.update_list(expert_ids);
+            for idx in evicted {
+                self.experts[idx].clear();
+            }
+        }
+
+        let profile_moe = moe_profile_enabled();
+        let mut final_hidden_states: Option<Tensor> = None;
+        for (topk_idx, &expert_idx) in expert_ids.iter().enumerate() {
+            let expert_output = if profile_moe {
+                let cached_before = self.experts[expert_idx].has_dequantized_weights_on_device();
+                let dequant_start = Instant::now();
+                self.experts[expert_idx].dequan_experts()?;
+                let dequant_elapsed = dequant_start.elapsed();
+                let forward_start = Instant::now();
+                let expert_output = self.experts[expert_idx].forward(hidden_states)?;
+                let forward_elapsed = forward_start.elapsed();
+                eprintln!(
+                    "[moe-profile] layer={} expert={} cached_before={} dequant_ms={:.2} forward_ms={:.2}",
+                    self.layer_idx,
+                    expert_idx,
+                    cached_before,
+                    dequant_elapsed.as_secs_f64() * 1000.0,
+                    forward_elapsed.as_secs_f64() * 1000.0
+                );
+                expert_output
+            } else {
+                self.experts[expert_idx].dequan_experts()?;
+                self.experts[expert_idx].forward(hidden_states)?
+            };
+            let weighted = expert_output.affine(routing_weights[topk_idx] as f64, 0.0)?;
+            final_hidden_states = Some(match final_hidden_states {
+                Some(acc) => (acc + weighted)?,
+                None => weighted,
+            });
+            self.post_comp(expert_idx)?;
+        }
+
+        final_hidden_states
+            .ok_or_else(|| candle_core::Error::Msg("single-token MoE selected no experts".into()))
     }
 }
 
@@ -307,81 +359,238 @@ pub enum Idx {
     Multiple(Vec<usize>),
 }
 
-pub fn topk_routing(routing_logits: &Tensor, k: usize, norm: bool) -> Result<(Tensor, Tensor)> {
-    // step 1: softmax to get routing_weights
-    //let routing_weights = candle_nn::ops::softmax_last_dim(routing_logits)?;
-    let routing_weights = candle_nn::ops::softmax(&routing_logits, 1)?.to_dtype(DType::F32)?;
-
-    // step 2: get top-k expert indices for each token
-    let topk_indices = routing_weights
-        .arg_sort_last_dim(false)? // descending sort
-        .narrow(D::Minus1, 0, k)? // take top-k
-        .contiguous()?; // ensure memory layout
-
-    // step 3: gather routing weights for top-k experts
-    let topk_weights = routing_weights.gather(&topk_indices, D::Minus1)?;
-
-    // optional: normalize top-k weights
-    let topk_weights = if norm {
-        let sum = topk_weights.sum_keepdim(D::Minus1)?;
-        topk_weights.broadcast_div(&sum)?
-    } else {
-        topk_weights
-    };
-
-    Ok((topk_weights, topk_indices))
+fn moe_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FCLLM_PROFILE_MOE").is_some())
 }
 
-/* pub fn one_hot(indices: &Tensor, num_classes: usize) -> Result<Tensor> {
-    let (batch, top_k) = indices.dims2()?; // shape: [B*S, top_k]
-    let device = indices.device();
-    let indices = indices.to_dtype(DType::I64)?; // index_add 需要 I64 类型
+fn dequant_cache_capacity(compressed_cache_capacity: usize, quant_bit: usize) -> usize {
+    if quant_bit == 0 {
+        return compressed_cache_capacity;
+    }
+    if compressed_cache_capacity == 0 {
+        return MIN_DEQUANT_CACHE_FOR_FULLY_OFFLOADED_LAYER;
+    }
 
-    // 展开 indices 到一维：shape [B*S * top_k]
-    let flat_indices = indices.flatten(0, 1)?;
+    // A dequantized BF16 expert is roughly 16 / quant_bit times larger than
+    // the packed expert. Keep the resident cache inside the old packed-weight
+    // memory envelope, then let ARC choose the hottest experts.
+    ((compressed_cache_capacity * quant_bit) / 16)
+        .max(1)
+        .min(compressed_cache_capacity)
+}
 
-    // 创建 shape 为 [B*S * top_k, num_classes] 的 one-hot 模板
-    let mut one_hot = Tensor::zeros(&[batch * top_k, num_classes], DType::F32, device)?;
+type ExpertAssignments = HashMap<usize, Vec<(usize, usize)>>;
 
-    // 构造行号 [0, 1, 2, ..., batch*top_k-1]
-    let row_ids = Tensor::arange(0u32, (batch * top_k) as u32, device)?.to_dtype(DType::I64)?;
+fn build_expert_assignments(
+    selected_experts: &Tensor,
+) -> Result<(ExpertAssignments, Vec<usize>, Vec<usize>)> {
+    let selected = selected_experts.to_vec2::<i64>()?;
+    let mut assignments: ExpertAssignments = HashMap::new();
+    let mut flat_experts = Vec::new();
+    let mut expert_order = Vec::new();
 
-    // 拼成二维索引 [row, col] -> shape: [B*S*top_k, 2]
-    let indices = Tensor::stack(&[&row_ids, &flat_indices], 1)?;
+    for (token_idx, row) in selected.iter().enumerate() {
+        for (topk_idx, &expert_idx) in row.iter().enumerate() {
+            let expert_idx = expert_idx as usize;
+            flat_experts.push(expert_idx);
 
-    // 每个位置加 1.0
-    let updates = Tensor::ones(&[batch * top_k], DType::F32, device)?;
-
-    // 使用 index_add 添加
-    one_hot = one_hot.index_add(&indices, &updates, 0)?;
-
-    // reshape 成 [B*S, top_k, num_experts]
-    one_hot.reshape(&[batch, top_k, num_classes])
-} */
-
-pub fn index_positions(mask: &Tensor, expert_idx: usize) -> Result<(Vec<usize>, Vec<usize>)> {
-    // mask shape: [num_experts, top_k, B*S]
-    let mask_slice = mask.get(expert_idx)?; // shape: [top_k, B*S]
-    let (top_k, batch_seq) = mask_slice.dims2()?;
-    let mask_data = mask_slice.to_vec2::<f32>()?;
-
-    let mut idx = Vec::new();
-    let mut top_x = Vec::new();
-
-    for i in 0..top_k {
-        for j in 0..batch_seq {
-            if mask_data[i][j] > 0.0 {
-                idx.push(i);
-                top_x.push(j);
+            match assignments.entry(expert_idx) {
+                Entry::Vacant(entry) => {
+                    expert_order.push(expert_idx);
+                    entry.insert(vec![(topk_idx, token_idx)]);
+                }
+                Entry::Occupied(mut entry) => {
+                    entry.get_mut().push((topk_idx, token_idx));
+                }
             }
         }
     }
 
-    Ok((idx, top_x))
+    Ok((assignments, flat_experts, expert_order))
+}
+
+fn split_expert_assignments(assignments: &[(usize, usize)]) -> (Vec<usize>, Vec<usize>) {
+    assignments.iter().copied().unzip()
+}
+
+fn topk_routing_rows(
+    logits_rows: &[Vec<f32>],
+    k: usize,
+    norm: bool,
+    experts: usize,
+) -> Result<(Vec<f32>, Vec<i64>)> {
+    if k == 0 || k > experts {
+        return Err(candle_core::Error::Msg(format!(
+            "invalid top-k {k} for {experts} experts"
+        )));
+    }
+
+    let mut all_weights = Vec::with_capacity(logits_rows.len() * k);
+    let mut all_indices = Vec::with_capacity(logits_rows.len() * k);
+
+    for logits in logits_rows {
+        let (weights, top) = topk_routing_row(logits, k, norm, experts)?;
+        all_weights.extend(weights);
+        all_indices.extend(top.into_iter().map(|(idx, _)| idx as i64));
+    }
+
+    Ok((all_weights, all_indices))
+}
+
+fn topk_routing_row(
+    logits: &[f32],
+    k: usize,
+    norm: bool,
+    experts: usize,
+) -> Result<(Vec<f32>, Vec<(usize, f32)>)> {
+    if logits.len() != experts {
+        return Err(candle_core::Error::Msg(format!(
+            "routing logits row has {} experts, expected {experts}",
+            logits.len()
+        )));
+    }
+
+    let top = select_topk_desc(logits, k);
+    let max_logit = logits
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, |acc, value| acc.max(value));
+    let denom: f32 = logits.iter().map(|value| (*value - max_logit).exp()).sum();
+    let mut weights: Vec<f32> = top
+        .iter()
+        .map(|&(_, value)| (value - max_logit).exp() / denom)
+        .collect();
+    if norm {
+        let top_sum: f32 = weights.iter().sum();
+        if top_sum != 0.0 {
+            for weight in &mut weights {
+                *weight /= top_sum;
+            }
+        }
+    }
+
+    Ok((weights, top))
+}
+
+fn topk_routing_single_token(
+    routing_logits: &Tensor,
+    k: usize,
+    norm: bool,
+) -> Result<(Vec<f32>, Vec<usize>)> {
+    let (tokens, experts) = routing_logits.dims2()?;
+    if tokens != 1 {
+        return Err(candle_core::Error::Msg(format!(
+            "single-token routing expected 1 token, got {tokens}"
+        )));
+    }
+
+    let logits = routing_logits
+        .to_dtype(DType::F32)?
+        .reshape((experts,))?
+        .to_vec1::<f32>()?;
+    let (weights, top) = topk_routing_row(&logits, k, norm, experts)?;
+    Ok((weights, top.into_iter().map(|(idx, _)| idx).collect()))
+}
+
+fn select_topk_desc(values: &[f32], k: usize) -> Vec<(usize, f32)> {
+    let mut top: Vec<(usize, f32)> = Vec::with_capacity(k);
+    for (idx, &value) in values.iter().enumerate() {
+        let insert_at = top
+            .iter()
+            .position(|&(_, existing)| value > existing)
+            .unwrap_or(top.len());
+        if insert_at < k {
+            top.insert(insert_at, (idx, value));
+            if top.len() > k {
+                top.pop();
+            }
+        }
+    }
+    top
+}
+
+pub fn topk_routing(routing_logits: &Tensor, k: usize, norm: bool) -> Result<(Tensor, Tensor)> {
+    let (tokens, experts) = routing_logits.dims2()?;
+    let logits = routing_logits.to_dtype(DType::F32)?.to_vec2::<f32>()?;
+    let (weights, indices) = topk_routing_rows(&logits, k, norm, experts)?;
+    let device = routing_logits.device();
+
+    Ok((
+        Tensor::from_vec(weights, (tokens, k), device)?,
+        Tensor::from_vec(indices, (tokens, k), device)?,
+    ))
 }
 
 pub fn select(t: &Tensor, indices: &[usize]) -> Result<Tensor> {
     let idx: Vec<u32> = indices.iter().map(|&i| i as u32).collect();
     let idx_tensor = Tensor::from_vec(idx, indices.len(), t.device())?;
     t.index_select(&idx_tensor, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dequant_cache_capacity_stays_within_packed_budget() {
+        assert_eq!(dequant_cache_capacity(0, 4), 2);
+        assert_eq!(dequant_cache_capacity(45, 4), 11);
+        assert_eq!(dequant_cache_capacity(60, 4), 15);
+        assert_eq!(dequant_cache_capacity(60, 2), 7);
+        assert_eq!(dequant_cache_capacity(60, 0), 60);
+    }
+
+    #[test]
+    fn expert_assignments_preserve_topk_and_first_seen_order() {
+        let selected =
+            Tensor::from_vec(vec![3i64, 1, 3, 2, 1, 4], (3, 2), &Device::Cpu).expect("tensor");
+        let (assignments, flat, order) = build_expert_assignments(&selected).expect("assignments");
+
+        assert_eq!(flat, vec![3, 1, 3, 2, 1, 4]);
+        assert_eq!(order, vec![3, 1, 2, 4]);
+        assert_eq!(assignments.get(&3).unwrap(), &vec![(0, 0), (0, 1)]);
+        assert_eq!(assignments.get(&1).unwrap(), &vec![(1, 0), (0, 2)]);
+        assert_eq!(assignments.get(&2).unwrap(), &vec![(1, 1)]);
+        assert_eq!(assignments.get(&4).unwrap(), &vec![(1, 2)]);
+    }
+
+    #[test]
+    fn single_token_cpu_topk_keeps_descending_order() {
+        let ids = select_topk_desc(&[0.1, 3.0, -1.0, 2.5, 0.7], 3)
+            .into_iter()
+            .map(|(idx, _)| idx)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec![1, 3, 4]);
+    }
+
+    #[test]
+    fn single_token_routing_matches_softmax_topk_normalization() -> Result<()> {
+        let logits = Tensor::from_vec(vec![0.1f32, 3.0, -1.0, 2.5, 0.7], (1, 5), &Device::Cpu)?;
+        let (weights, ids) = topk_routing_single_token(&logits, 3, true)?;
+
+        assert_eq!(ids, vec![1, 3, 4]);
+        assert!((weights.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        assert!(weights[0] > weights[1]);
+        assert!(weights[1] > weights[2]);
+        Ok(())
+    }
+
+    #[test]
+    fn topk_routing_handles_multiple_tokens_without_full_sort() -> Result<()> {
+        let logits = Tensor::from_vec(
+            vec![0.1f32, 3.0, -1.0, 2.5, 0.7, 2.0, -1.0, 0.0, 0.5, 4.0],
+            (2, 5),
+            &Device::Cpu,
+        )?;
+        let (weights, ids) = topk_routing(&logits, 2, true)?;
+
+        assert_eq!(ids.to_vec2::<i64>()?, vec![vec![1, 3], vec![4, 0]]);
+        for row in weights.to_vec2::<f32>()? {
+            assert!((row.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+            assert!(row[0] > row[1]);
+        }
+        Ok(())
+    }
 }

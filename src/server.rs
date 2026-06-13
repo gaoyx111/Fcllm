@@ -44,7 +44,7 @@ const AUTO_MIN_WORKER_GPU_MB: usize = 4096;
 const MIN_RELIABLE_GPU_WORKER_DELTA_MB: usize = 512;
 const AUTO_MIN_WORKER_SYSTEM_MB: usize = 2048;
 const MIN_RELIABLE_SYSTEM_WORKER_DELTA_MB: usize = 512;
-const SHARED_WEIGHT_WORKER_MIN_FREE_GPU_MB: usize = 384;
+const SHARED_WEIGHT_WORKER_MIN_FREE_GPU_MB: usize = 2 * 1024;
 const SHARED_WEIGHT_WORKER_MIN_FREE_SYSTEM_MB: usize = 1024;
 const MAX_AUTO_MODEL_WORKERS: usize = 8;
 
@@ -766,7 +766,7 @@ fn can_spawn_shared_weight_worker_with_gpu_memory(
         return false;
     };
     let free_mb = total_mb.saturating_sub(used_mb);
-    let allowed = free_mb > SHARED_WEIGHT_WORKER_MIN_FREE_GPU_MB;
+    let allowed = shared_weight_gpu_has_spawn_headroom(free_mb);
 
     eprintln!(
         "[worker-pool] 共享权重 GPU 并发检查：workers={} free_gpu_mb={} min_free_gpu_mb={} spawn={}",
@@ -798,6 +798,10 @@ fn can_spawn_shared_weight_worker_with_system_memory(
     );
 
     allowed
+}
+
+fn shared_weight_gpu_has_spawn_headroom(free_mb: usize) -> bool {
+    free_mb >= SHARED_WEIGHT_WORKER_MIN_FREE_GPU_MB
 }
 
 fn auto_worker_hard_cap(config: &AutoWorkerPoolConfig) -> usize {
@@ -1349,10 +1353,10 @@ fn runtime_date_context() -> String {
     )
 }
 
-fn runtime_current_date_fact() -> String {
+fn runtime_date_statement() -> String {
     let date = runtime_date_info();
     format!(
-        "现在是{:04}年{}月{}日，星期{}。",
+        "{:04}年{}月{}日，星期{}",
         date.year, date.month, date.day, date.weekday
     )
 }
@@ -2374,10 +2378,44 @@ fn generated_user_question_prefix(text: &str) -> bool {
         "好的，謝謝",
         "好的，非常感谢",
         "好的，非常感謝",
+        "好的，我会试",
+        "好的，我會試",
+        "好的，我先试",
+        "好的，我先試",
+        "好的，我去试",
+        "好的，我去試",
+        "好，我会试",
+        "好，我會試",
+        "我会试",
+        "我會試",
+        "我先试",
+        "我先試",
+        "我去试",
+        "我去試",
         "谢谢",
         "謝謝",
         "非常感谢",
         "非常感謝",
+        "另外我想问",
+        "另外我想問",
+        "另外想问",
+        "另外想問",
+        "另外问一下",
+        "另外問一下",
+        "另外问",
+        "另外問",
+        "顺便问",
+        "順便問",
+        "再问一下",
+        "再問一下",
+        "再问个",
+        "再問個",
+        "还有一个问题",
+        "還有一個問題",
+        "还有个问题",
+        "還有個問題",
+        "还有我想问",
+        "還有我想問",
         "那我",
         "那你",
         "那您",
@@ -2389,8 +2427,6 @@ fn generated_user_question_prefix(text: &str) -> bool {
         "那接下來",
         "接下来我",
         "接下來我",
-        "顺便问",
-        "順便問",
         "我想问",
         "我想問",
         "我还想",
@@ -3985,9 +4021,15 @@ fn temporal_answer_guard(generated: &str, user_prompt: &str) -> Option<TemporalA
     None
 }
 
-fn verified_runtime_temporal_answer(user_prompt: Option<&str>) -> Option<String> {
-    let user_prompt = user_prompt?;
-    asks_exact_current_date_question(user_prompt).then(runtime_current_date_fact)
+fn is_complete_expected_current_date_answer(generated: &str, user_prompt: &str) -> bool {
+    if !asks_exact_current_date_question(user_prompt) {
+        return false;
+    }
+
+    let trimmed = generated.trim_start();
+    !trimmed.is_empty()
+        && contains_expected_current_date(trimmed, runtime_date_info())
+        && ends_with_sentence_terminal(trimmed)
 }
 
 fn asks_exact_current_date_question(text: &str) -> bool {
@@ -3997,31 +4039,11 @@ fn asks_exact_current_date_question(text: &str) -> bool {
     }
 
     let lower = normalized.to_ascii_lowercase();
-    if [
-        "训练语料",
-        "訓練語料",
-        "训练数据",
-        "訓練資料",
-        "语料截止",
-        "語料截止",
-        "数据截止",
-        "資料截止",
-    ]
-    .iter()
-    .any(|marker| normalized.contains(marker))
-        || [
-            "training data",
-            "training cutoff",
-            "knowledge cutoff",
-            "cutoff",
-        ]
-        .iter()
-        .any(|marker| lower.contains(marker))
-    {
+    if asks_training_cutoff_question(normalized) {
         return false;
     }
 
-    let asks_date = [
+    [
         "今天是哪",
         "今天是几",
         "今天幾",
@@ -4035,12 +4057,17 @@ fn asks_exact_current_date_question(text: &str) -> bool {
         "現在是幾",
         "现在几月",
         "現在幾月",
-        "哪一年",
-        "哪年",
-        "哪一个月",
-        "哪一天",
-        "哪个月",
-        "哪個月",
+        "当前是哪",
+        "當前是哪",
+        "当前是几",
+        "當前是幾",
+        "此刻是哪",
+        "此刻是几",
+        "哪一年几月几号",
+        "哪一年几月几日",
+        "哪一年哪一个月哪一天",
+        "哪年哪个月哪天",
+        "哪年哪月哪日",
         "几月几号",
         "幾月幾號",
         "几月几日",
@@ -4049,7 +4076,6 @@ fn asks_exact_current_date_question(text: &str) -> bool {
         "星期幾",
         "周几",
         "週幾",
-        "日期",
     ]
     .iter()
     .any(|marker| normalized.contains(marker))
@@ -4061,19 +4087,108 @@ fn asks_exact_current_date_question(text: &str) -> bool {
             "day of week",
         ]
         .iter()
-        .any(|marker| lower.contains(marker));
+        .any(|marker| lower.contains(marker))
+        || asks_current_date_with_date_word(normalized, &lower)
+}
 
-    if !asks_date {
+fn asks_training_cutoff_question(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "训练语料",
+        "訓練語料",
+        "训练数据",
+        "訓練資料",
+        "语料截止",
+        "語料截止",
+        "数据截止",
+        "資料截止",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+        || [
+            "training data",
+            "training cutoff",
+            "knowledge cutoff",
+            "cutoff",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+fn asks_current_date_with_date_word(normalized: &str, lower: &str) -> bool {
+    let has_current_anchor = ["今天", "今日", "现在", "現在", "当前", "當前", "此刻"]
+        .iter()
+        .any(|marker| normalized.contains(marker))
+        || ["today", "current", "right now", "now"]
+            .iter()
+            .any(|marker| lower.contains(marker));
+    if !has_current_anchor {
         return false;
     }
 
-    !["天气", "天氣", "心情", "新闻", "新聞", "最近"]
+    [
+        "今天的日期",
+        "今天日期",
+        "今日日期",
+        "现在的日期",
+        "現在的日期",
+        "现在日期",
+        "現在日期",
+        "当前日期",
+        "當前日期",
+        "当前的日期",
+        "當前的日期",
+        "现在是什么日期",
+        "現在是什麼日期",
+        "当前是什么日期",
+        "當前是什麼日期",
+        "今天是什么日期",
+        "今天是什麼日期",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+        || ["today's date", "current date", "date today"]
+            .iter()
+            .any(|marker| lower.contains(marker))
+}
+
+fn asks_relative_calendar_date_question(text: &str) -> bool {
+    let normalized = text.trim();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    let lower = normalized.to_ascii_lowercase();
+    let has_relative_anchor = ["明天", "昨天", "后天", "後天", "前天"]
         .iter()
-        .any(|marker| {
-            normalized.contains(marker)
-                && !normalized.contains("几月")
-                && !normalized.contains("日期")
-        })
+        .any(|marker| normalized.contains(marker))
+        || ["tomorrow", "yesterday"]
+            .iter()
+            .any(|marker| lower.contains(marker));
+    if !has_relative_anchor {
+        return false;
+    }
+
+    [
+        "几号",
+        "幾號",
+        "几日",
+        "幾日",
+        "几月",
+        "幾月",
+        "哪天",
+        "哪一天",
+        "星期几",
+        "星期幾",
+        "周几",
+        "週幾",
+        "日期",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+        || ["what date", "which date", "day of week"]
+            .iter()
+            .any(|marker| lower.contains(marker))
 }
 
 fn contains_expected_current_date(text: &str, date: RuntimeDateInfo) -> bool {
@@ -4179,9 +4294,11 @@ fn build_guard_retry_prompt(
     let date_retry = user_prompt.is_some_and(asks_exact_current_date_question);
     let mut instruction = if date_retry {
         format!(
-            "上一轮日期回答错误或不完整。\n日期字段：{}\n用户问题：{}\n请只用上面的日期字段回答用户问题。最终答案必须从 DATE_YEAR 字段对应的四位年份开头，格式为“DATE_YEAR年DATE_MONTH月DATE_DAY日，DATE_WEEKDAY。”；不要以“今天是”“现在是”或“【当前信息】”开头，不要输出任何其他年份、旧日期、角色标签、乱码或下一轮对话。",
+            "上一轮日期回答错误或不完整。\n当前系统日期：{}。\n日期字段：{}\n用户问题：{}\n请只依据“当前系统日期”和“日期字段”回答用户问题。必须把 DATE_YEAR、DATE_MONTH、DATE_DAY、DATE_WEEKDAY 替换为字段值，不要输出字段名。最终答案只写一行“{}。”；不要以“今天是”“现在是”或“【当前信息】”开头，不要输出任何其他年份、旧日期、角色标签、乱码或下一轮对话。",
+            runtime_date_statement(),
             runtime_date_fields(),
-            user_prompt.unwrap_or("").trim()
+            user_prompt.unwrap_or("").trim(),
+            runtime_date_statement()
         )
     } else if user_prompt.is_some_and(is_simple_greeting_prompt_text) {
         String::from(
@@ -4306,11 +4423,6 @@ fn model_worker_loop_inner(
             };
 
             let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&x| x as i64).collect();
-            let attn_mask: Vec<i64> = encoding
-                .get_attention_mask()
-                .iter()
-                .map(|&x| x as i64)
-                .collect();
 
             let device = model.device.clone();
             let input_tensor =
@@ -4318,15 +4430,6 @@ fn model_worker_loop_inner(
                     Ok(t) => t,
                     Err(e) => {
                         eprintln!("[worker] 创建 input tensor 失败: {e}");
-                        break;
-                    }
-                };
-
-            let attn_tensor =
-                match Tensor::new(attn_mask.as_slice(), &device).and_then(|t| t.unsqueeze(0)) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        eprintln!("[worker] 创建 attention_mask tensor 失败: {e}");
                         break;
                     }
                 };
@@ -4342,7 +4445,7 @@ fn model_worker_loop_inner(
             let mut flushed_to_client = false;
             let mut generated_token_count = 0usize;
 
-            let result = model.generate_streaming(&input_tensor, Some(attn_tensor), |tok_id| {
+            let result = model.generate_streaming(&input_tensor, None, |tok_id| {
                 if token_tx.is_closed() {
                     client_disconnected = true;
                     eprintln!("[worker] 客户端已断开，停止当前生成");
@@ -4392,6 +4495,18 @@ fn model_worker_loop_inner(
                                 return false;
                             }
                         }
+                    }
+                    if is_complete_expected_current_date_answer(&text_acc, user_text) {
+                        let before_flush = buffered_len(&token_buf);
+                        if !flush_ready_buffer(&text_acc, &mut token_buf, &token_tx) {
+                            stopped_by_guard = true;
+                            return false;
+                        }
+                        if buffered_len(&token_buf) < before_flush {
+                            flushed_to_client = true;
+                        }
+                        eprintln!("[worker] 日期回答已形成可靠事实，停止继续生成");
+                        return false;
                     }
 
                     if should_stop_user_echo(&text_acc, user_text) {
@@ -4551,14 +4666,13 @@ fn model_worker_loop_inner(
                 continue;
             }
 
-            if should_retry_guarded && !flushed_to_client {
-                if let Some(answer) = verified_runtime_temporal_answer(user_echo_guard.as_deref()) {
-                    eprintln!("[worker] 日期事实守卫连续失败，使用运行时事实生成动态纠偏答案");
-                    text_acc = answer.clone();
-                    token_buf.clear();
-                    let _ = token_tx.blocking_send(Some(answer));
-                    stopped_by_guard = false;
-                }
+            if should_retry_guarded
+                && !flushed_to_client
+                && user_echo_guard
+                    .as_deref()
+                    .is_some_and(asks_exact_current_date_question)
+            {
+                eprintln!("[worker] 日期事实守卫连续失败；不使用非模型兜底回复，结束本次无效生成");
             }
 
             let hit_length_limit =
@@ -4946,6 +5060,7 @@ fn should_use_prior_context(user_prompt: &str) -> bool {
     ]
     .iter()
     .any(|marker| normalized.contains(marker))
+        || asks_for_evaluation_of_current_work(normalized)
     {
         return true;
     }
@@ -4969,6 +5084,51 @@ fn should_use_prior_context(user_prompt: &str) -> bool {
     ]
     .iter()
     .any(|marker| compact == *marker)
+}
+
+fn asks_for_evaluation_of_current_work(text: &str) -> bool {
+    let asks_evaluation = [
+        "你觉得",
+        "你認為",
+        "你认为",
+        "怎么样",
+        "怎麼樣",
+        "如何",
+        "哪里需要改进",
+        "哪裡需要改進",
+        "哪里能改进",
+        "有什么需要改进",
+        "有什么改进",
+        "有哪里需要改进",
+        "有哪些问题",
+        "有什么问题",
+        "有什么建议",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker));
+
+    let refers_to_current_work = [
+        "如下",
+        "上面",
+        "前面",
+        "这个",
+        "这些",
+        "结果",
+        "效果",
+        "汇总",
+        "模型",
+        "预测",
+        "报告",
+        "方案",
+        "我现在",
+        "我目前",
+        "目前使用",
+        "正在使用",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker));
+
+    asks_evaluation && refers_to_current_work
 }
 
 fn should_prioritize_recent_turn_context(user_prompt: &str) -> bool {
@@ -5074,8 +5234,10 @@ fn clean_history_message_for_prompt_with_reason(
     if cleaned.is_empty() {
         return Err("empty-after-clean");
     }
-    if let Some(reason) = prior_history_pollution_reason(cleaned) {
-        return Err(reason);
+    if message.role == "assistant" {
+        if let Some(reason) = prior_history_pollution_reason(cleaned) {
+            return Err(reason);
+        }
     }
 
     Ok(ChatMessage {
@@ -5581,9 +5743,11 @@ fn augment_user_prompt_content(content: &str) -> String {
     let mut augmented = if should_append_runtime_date_hint(content) {
         if asks_exact_current_date_question(content) {
             format!(
-                "日期字段：{}\n用户问题：{}\n请只用上面的日期字段回答这个问题。最终答案必须从 DATE_YEAR 字段对应的四位年份开头，格式为“DATE_YEAR年DATE_MONTH月DATE_DAY日，DATE_WEEKDAY。”；不要以“今天是”“现在是”或“【当前信息】”开头，不要猜测日期，不要输出其他日期、角色标签、乱码或下一轮对话。",
+                "当前系统日期：{}。\n日期字段：{}\n用户问题：{}\n请只用上面的当前系统日期和日期字段回答这个问题。必须把 DATE_YEAR、DATE_MONTH、DATE_DAY、DATE_WEEKDAY 替换为字段值，不要输出字段名。最终答案只写一行“{}。”；不要以“今天是”“现在是”或“【当前信息】”开头，不要猜测日期，不要输出其他日期、角色标签、乱码或下一轮对话。",
+                runtime_date_statement(),
                 runtime_date_fields(),
-                content
+                content,
+                runtime_date_statement()
             )
         } else {
             format!(
@@ -5616,47 +5780,9 @@ fn should_append_runtime_date_hint(content: &str) -> bool {
         return false;
     }
 
-    let lower = normalized.to_ascii_lowercase();
-    [
-        "今天",
-        "今日",
-        "现在",
-        "現在",
-        "当前",
-        "當前",
-        "日期",
-        "几月几号",
-        "幾月幾號",
-        "几月几日",
-        "幾月幾日",
-        "哪一年",
-        "哪年",
-        "星期几",
-        "星期幾",
-        "周几",
-        "週幾",
-        "明天",
-        "昨天",
-        "训练语料",
-        "訓練語料",
-        "训练数据",
-        "訓練資料",
-    ]
-    .iter()
-    .any(|marker| normalized.contains(marker))
-        || [
-            "today",
-            "current date",
-            "what date",
-            "which date",
-            "day of week",
-            "tomorrow",
-            "yesterday",
-            "training data",
-            "cutoff",
-        ]
-        .iter()
-        .any(|marker| lower.contains(marker))
+    asks_exact_current_date_question(normalized)
+        || asks_relative_calendar_date_question(normalized)
+        || asks_training_cutoff_question(normalized)
 }
 
 fn should_append_chinese_reply_hint(content: &str) -> bool {
@@ -6676,6 +6802,39 @@ mod tests {
     }
 
     #[test]
+    fn lppl_evaluation_followup_uses_recent_context_without_date_guard() {
+        let history = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "python库lppls是什么？我用LPPL模型预测两个数据泡沫破裂时间，靠谱吗？"
+                    .to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "LPPL通常用于描述金融泡沫价格的对数周期幂律结构，预测时应关注滚动稳定性、参数约束、拟合残差和样本外验证。"
+                    .to_string(),
+            },
+        ];
+        let user_prompt = "我现在使用LPPL模型预测的效果如下：\n- tc 在最后日期后 252 天内。\n- lppl_cmaes_summary.csv：每条指数的预测日期汇总。\n你觉得怎么样？有哪里需要改进？";
+
+        let (prompt, debug) =
+            build_chat_process_prompt_with_debug(&history, user_prompt, "", "conv-lppl");
+
+        assert!(should_use_prior_context(user_prompt));
+        assert!(debug.prior_context_triggered);
+        assert!(prompt.contains("python库lppls是什么"));
+        assert!(prompt.contains("滚动稳定性"));
+        assert!(!asks_exact_current_date_question(user_prompt));
+        assert!(!should_append_runtime_date_hint(user_prompt));
+        assert!(
+            debug
+                .selected
+                .iter()
+                .any(|item| item.role == "assistant" && item.reason == "recent-context")
+        );
+    }
+
+    #[test]
     fn short_guarded_answer_is_filtered_from_context_debug() {
         let history = vec![
             ChatMessage {
@@ -6804,6 +6963,17 @@ mod tests {
     }
 
     #[test]
+    fn shared_weight_worker_gpu_headroom_rejects_low_runtime_margin() {
+        assert!(!shared_weight_gpu_has_spawn_headroom(630));
+        assert!(!shared_weight_gpu_has_spawn_headroom(
+            SHARED_WEIGHT_WORKER_MIN_FREE_GPU_MB - 1
+        ));
+        assert!(shared_weight_gpu_has_spawn_headroom(
+            SHARED_WEIGHT_WORKER_MIN_FREE_GPU_MB
+        ));
+    }
+
+    #[test]
     fn greeting_generation_drift_is_guarded_before_streaming() {
         let generated =
             "好的，我明白了。现在我想知道如何在Python中使用Pandas库来读取CSV文件并进行数据分析。";
@@ -6914,6 +7084,40 @@ mod tests {
         assert!(saved[1].content.contains("Hello"));
         assert!(!saved.iter().any(|msg| msg.content.contains("秧苗")));
         assert!(!saved.iter().any(|msg| msg.content.contains("星露城谷物语")));
+    }
+
+    #[test]
+    fn saving_normal_user_question_keeps_full_turn_for_followup_context() {
+        let store: ConversationStore = Arc::new(Mutex::new(HashMap::new()));
+
+        save_conversation_turn(
+            &store,
+            "conv-family-health",
+            &[],
+            "你好，我今天有点难过，因为家人生病了。你能安慰我一下吗？",
+            "很抱歉听到您家里有人生病的消息。我会尽力帮助您度过难关。如果您需要任何支持，请告诉我您的需求。",
+            false,
+        );
+
+        let saved = load_conversation_history(&store, "conv-family-health");
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].role, "user");
+        assert!(saved[0].content.contains("家人生病"));
+        assert_eq!(saved[1].role, "assistant");
+
+        let (prompt, debug) = build_chat_process_prompt_with_debug(
+            &saved,
+            "你能接着刚才的话，给我两个现在就能做的具体建议吗？",
+            "",
+            "conv-family-health",
+        );
+
+        assert!(debug.prior_context_triggered);
+        assert_eq!(debug.selected.len(), 2);
+        assert!(debug.selected.iter().any(|msg| msg.role == "user"));
+        assert!(debug.selected.iter().any(|msg| msg.role == "assistant"));
+        assert!(prompt.contains("家人生病"));
+        assert!(prompt.contains("很抱歉听到您家里有人生病"));
     }
 
     #[test]
@@ -7489,6 +7693,19 @@ mod tests {
     }
 
     #[test]
+    fn detects_polite_ack_generated_user_turn_after_sleep_advice() {
+        let text = "你可以尝试以下方法：1. 晚上避免使用电子设备，如手机和电脑等，因为这些设备会发出蓝光，影响睡眠质量。2. 在睡前放松自己，可以听一些轻柔的音乐或者进行冥想来帮助自己放松身心。3. 保持良好的作息习惯，每天固定的睡觉时间和起床时间有助于调整生物钟，提高睡眠质量。4. 避免在睡前吃太多食物，尤其是高脂肪和高糖分的食物，这会影响消化系统的正常运作，并且容易引起胃部不适。希望以上建议对你有所帮助。\n\n好的，我会试试看。另外我想问一下，最近天气怎么样啊？如今后几天会不会下雨呢？";
+        let stop = find_text_stop(text).expect("polite generated user turn should stop generation");
+        let clean_end = clean_stop_prefix_len(&text[..stop.pos]);
+
+        assert_eq!(
+            &text[..clean_end],
+            "你可以尝试以下方法：1. 晚上避免使用电子设备，如手机和电脑等，因为这些设备会发出蓝光，影响睡眠质量。2. 在睡前放松自己，可以听一些轻柔的音乐或者进行冥想来帮助自己放松身心。3. 保持良好的作息习惯，每天固定的睡觉时间和起床时间有助于调整生物钟，提高睡眠质量。4. 避免在睡前吃太多食物，尤其是高脂肪和高糖分的食物，这会影响消化系统的正常运作，并且容易引起胃部不适。希望以上建议对你有所帮助。"
+        );
+        assert_eq!(stop.marker, "generated-user-turn");
+    }
+
+    #[test]
     fn ready_buffer_holds_generated_user_turn_prefix() {
         let text = "这些歌曲都比较舒缓，适合放松心情。\n\n好的，谢谢";
         let mut token_buf = std::collections::VecDeque::from([text.to_string()]);
@@ -7503,6 +7720,23 @@ mod tests {
         );
         assert!(rx.blocking_recv().is_none());
         assert_eq!(token_buf.into_iter().collect::<String>(), "\n\n好的，谢谢");
+    }
+
+    #[test]
+    fn ready_buffer_holds_polite_ack_generated_user_turn_prefix() {
+        let text = "希望以上建议对你有所帮助。\n\n好的，我会";
+        let mut token_buf = std::collections::VecDeque::from([text.to_string()]);
+        let (tx, mut rx) = mpsc::channel(4);
+
+        assert!(flush_ready_buffer(text, &mut token_buf, &tx));
+        drop(tx);
+
+        assert_eq!(
+            rx.blocking_recv(),
+            Some(Some("希望以上建议对你有所帮助。".to_string()))
+        );
+        assert!(rx.blocking_recv().is_none());
+        assert_eq!(token_buf.into_iter().collect::<String>(), "\n\n好的，我会");
     }
 
     #[test]
@@ -7523,6 +7757,27 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].role, "user");
         assert!(!saved.iter().any(|msg| msg.content.contains("在哪里看")));
+    }
+
+    #[test]
+    fn polite_ack_generated_user_turn_history_is_not_saved() {
+        let store = Arc::new(Mutex::new(HashMap::new()));
+        let assistant_text =
+            "希望以上建议对你有所帮助。\n\n好的，我会试试看。另外我想问一下，最近天气怎么样啊？";
+
+        save_conversation_turn(
+            &store,
+            "conv-polite-generated-user-turn",
+            &[],
+            "我入睡非常困难。怎么办？",
+            assistant_text,
+            false,
+        );
+
+        let saved = load_conversation_history(&store, "conv-polite-generated-user-turn");
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].role, "user");
+        assert!(!saved.iter().any(|msg| msg.content.contains("天气怎么样")));
     }
 
     #[test]
@@ -7558,9 +7813,36 @@ mod tests {
 
     #[test]
     fn temporal_guard_accepts_runtime_date_answer() {
-        let fact = runtime_current_date_fact();
+        let date = runtime_date_info();
+        let fact = format!(
+            "现在是{:04}年{}月{}日，星期{}。",
+            date.year, date.month, date.day, date.weekday
+        );
 
         assert_eq!(temporal_answer_guard(&fact, "今天是哪一年几月几号？"), None);
+    }
+
+    #[test]
+    fn complete_runtime_date_answer_can_stop_generation() {
+        let date = runtime_date_info();
+        let complete = format!(
+            "{:04}年{}月{}日，星期{}。",
+            date.year, date.month, date.day, date.weekday
+        );
+        let partial = format!("{:04}年{}月{}日，星期", date.year, date.month, date.day);
+
+        assert!(is_complete_expected_current_date_answer(
+            &complete,
+            "今天是哪一年几月几号，星期几？"
+        ));
+        assert!(!is_complete_expected_current_date_answer(
+            &partial,
+            "今天是哪一年几月几号，星期几？"
+        ));
+        assert!(!is_complete_expected_current_date_answer(
+            &complete,
+            "我现在使用LPPL模型，预测日期如下，你觉得怎么样？"
+        ));
     }
 
     #[test]
@@ -7574,27 +7856,73 @@ mod tests {
         assert!(prompt.contains("不能编造具体日期"));
         assert!(prompt.contains("日期字段：DATE_YEAR="));
         assert!(prompt.contains("用户问题：今天是哪一年几月几号？"));
-        assert!(prompt.contains("必须从 DATE_YEAR 字段对应的四位年份开头"));
+        assert!(
+            prompt.contains("必须把 DATE_YEAR、DATE_MONTH、DATE_DAY、DATE_WEEKDAY 替换为字段值")
+        );
+        assert!(prompt.contains("不要输出字段名"));
         assert!(prompt.contains("不要猜测日期"));
     }
 
     #[test]
-    fn runtime_temporal_fallback_is_dynamic_for_exact_date() {
-        let answer = verified_runtime_temporal_answer(Some("今天是哪一年几月几号，星期几？"))
-            .expect("exact date question should have runtime factual fallback");
-
-        assert_eq!(
-            temporal_answer_guard(&answer, "今天是哪一年几月几号？"),
-            None
+    fn exact_date_retry_is_model_prompt_with_runtime_fields() {
+        let retry_prompt = build_guard_retry_prompt(
+            "<|im_start|>system\nx<|im_end|>\n<|im_start|>user\n今天是哪一年几月几号，星期几？<|im_end|>\n<|im_start|>assistant\n",
+            Some("今天是哪一年几月几号，星期几？"),
+            1,
         );
+
+        assert!(retry_prompt.contains("日期字段：DATE_YEAR="));
+        assert!(retry_prompt.contains("用户问题：今天是哪一年几月几号，星期几？"));
+        assert!(retry_prompt.ends_with("<|im_start|>assistant\n"));
     }
 
     #[test]
-    fn runtime_temporal_fallback_does_not_answer_training_cutoff() {
+    fn training_cutoff_uses_hint_but_not_exact_date_guard() {
+        assert!(!asks_exact_current_date_question(
+            "你的训练语料中最晚的日期是哪天？"
+        ));
+        assert!(should_append_runtime_date_hint(
+            "你的训练语料中最晚的日期是哪天？"
+        ));
+    }
+
+    #[test]
+    fn lppl_report_does_not_trigger_temporal_guard_or_date_augmentation() {
+        let prompt = "我现在使用LPPL模型预测的效果如下：\n# LPPL-CMAES 泡沫破裂时间预测\n- 合格正泡沫筛选：tc 在最后日期后 252 天内。\n## 汇总\n- 费城半导体指数：严格合格中位预测 2026-06-18，四分位区间 2026-06-10 至 2026-06-21。\n## 输出文件\n- lppl_cmaes_summary.csv：每条指数的预测日期汇总。\n你觉得怎么样？有哪里需要改进？";
+
+        assert!(!asks_exact_current_date_question(prompt));
+        assert!(!should_append_runtime_date_hint(prompt));
         assert_eq!(
-            verified_runtime_temporal_answer(Some("你的训练语料中最晚的日期是哪天？")),
+            temporal_answer_guard("现在是2026年6月10日，星期三。", prompt),
             None
         );
+
+        let qwen_prompt = messages_to_qwen_prompt(&[ChatMessage {
+            role: "user".to_string(),
+            content: prompt.to_string(),
+        }]);
+
+        assert!(qwen_prompt.contains("LPPL-CMAES 泡沫破裂时间预测"));
+        assert!(!qwen_prompt.contains("日期字段：DATE_YEAR="));
+        assert!(!qwen_prompt.contains("【当前事实】"));
+        assert!(!qwen_prompt.contains("请根据【当前事实】回答"));
+    }
+
+    #[test]
+    fn runtime_date_hint_only_applies_to_calendar_date_questions() {
+        assert!(asks_exact_current_date_question(
+            "今天是哪一年几月几号，星期几？"
+        ));
+        assert!(should_append_runtime_date_hint("明天是几月几号，星期几？"));
+        assert!(!should_append_runtime_date_hint(
+            "明天上海的天气预报怎么样？"
+        ));
+        assert!(!asks_exact_current_date_question(
+            "当前价格分布的概率密度函数应该怎么估计？"
+        ));
+        assert!(!asks_exact_current_date_question(
+            "请按输出文件中的日期列解释预测结果。"
+        ));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::configuration_qwen::{Qwen2MoeConfig, get_qwen_config};
 use crate::linear::new_uninitialized_linear;
 use crate::load::load_linear_from_files;
 use crate::utils::memory_cost_qwen;
-use candle_core::{DType, Device, Result, Tensor};
+use candle_core::{D, DType, Device, Result, Tensor};
 use candle_nn::{Linear, Module};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -13,16 +13,26 @@ use std::time::Instant;
 
 const GENERATION_REPETITION_PENALTY: f32 = 1.15;
 const GENERATION_NO_REPEAT_NGRAM_SIZE: usize = 4;
+const STATIC_KV_CACHE_MIN_CAPACITY: usize = 128;
 
-fn tensor_first_row_u32(input_ids: &Tensor) -> Result<Vec<u32>> {
-    let rows = input_ids.to_vec2::<i64>()?;
-    Ok(rows
-        .into_iter()
-        .next()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|id| (id >= 0).then_some(id as u32))
-        .collect())
+fn tensor_debug_enabled() -> bool {
+    std::env::var_os("FCLLM_DEBUG_TENSORS").is_some()
+}
+
+fn static_kv_cache_capacity(
+    seq_len: usize,
+    max_new_tokens: usize,
+    max_position_embeddings: usize,
+) -> usize {
+    let capacity = seq_len
+        .saturating_add(max_new_tokens)
+        .saturating_add(1)
+        .min(max_position_embeddings);
+    if capacity >= STATIC_KV_CACHE_MIN_CAPACITY {
+        capacity
+    } else {
+        0
+    }
 }
 
 fn select_next_token_with_repetition_controls(
@@ -41,6 +51,26 @@ fn select_next_token_with_repetition_controls(
     }
 
     argmax_score(&scores).unwrap_or(0)
+}
+
+fn select_next_token_from_logits(
+    logits: &Tensor,
+    generated_ids: &[u32],
+    repetition_penalty: f32,
+    no_repeat_ngram_size: usize,
+) -> Result<u32> {
+    let raw_argmax = logits.argmax(D::Minus1)?.to_scalar::<u32>()?;
+    if generated_ids.is_empty() || !generated_ids.contains(&raw_argmax) {
+        return Ok(raw_argmax);
+    }
+
+    let scores = logits.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+    Ok(select_next_token_with_repetition_controls(
+        &scores,
+        generated_ids,
+        repetition_penalty,
+        no_repeat_ngram_size,
+    ))
 }
 
 fn apply_repetition_penalty(scores: &mut [f32], token_ids: &[u32], penalty: f32) {
@@ -90,6 +120,34 @@ mod tests {
 
         assert_eq!(banned_no_repeat_tokens(&[10, 11, 12, 10, 11], 3), vec![12]);
         assert_eq!(selected, 13);
+    }
+
+    #[test]
+    fn tensor_argmax_fast_path_handles_unseen_argmax() -> Result<()> {
+        let logits = Tensor::from_vec(vec![1.0f32, 3.0, 2.9], (3,), &Device::Cpu)?;
+        let selected =
+            select_next_token_from_logits(&logits, &[2, 2], GENERATION_REPETITION_PENALTY, 0)?;
+
+        assert_eq!(selected, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn tensor_argmax_fast_path_falls_back_for_repeated_argmax() -> Result<()> {
+        let logits = Tensor::from_vec(vec![1.0f32, 2.0, 1.9], (3,), &Device::Cpu)?;
+        let selected =
+            select_next_token_from_logits(&logits, &[1, 1], GENERATION_REPETITION_PENALTY, 0)?;
+
+        assert_eq!(selected, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn static_kv_cache_skips_tiny_contexts_but_handles_normal_chat() {
+        assert_eq!(static_kv_cache_capacity(16, 16, 8192), 0);
+        assert_eq!(static_kv_cache_capacity(64, 64, 8192), 129);
+        assert_eq!(static_kv_cache_capacity(900, 200, 8192), 1101);
+        assert_eq!(static_kv_cache_capacity(8000, 512, 8192), 8192);
     }
 }
 
@@ -247,7 +305,7 @@ impl Qwen2MoeForCausalLM {
         };
 
         // One-shot diagnostics on the first (prefill) call
-        if logits_input.dim(1)? > 1 {
+        if tensor_debug_enabled() && logits_input.dim(1)? > 1 {
             let li_f32 = logits_input.to_dtype(DType::F32)?;
             let li_abs_max = li_f32.flatten_all()?.abs()?.max(0)?;
             eprintln!(
@@ -278,40 +336,64 @@ impl Qwen2MoeForCausalLM {
     pub fn generate_streaming<F>(
         &mut self,
         input_ids: &Tensor,
-        attention_mask: Option<Tensor>,
+        _attention_mask: Option<Tensor>,
         mut callback: F,
     ) -> Result<()>
     where
         F: FnMut(u32) -> bool,
     {
-        let mut past_key_values = Some(Cache::new(true, input_ids.dtype(), &self.config)?);
         let seq_len = input_ids.dim(1)?;
         let device = self.device.clone();
+        let cache_capacity = static_kv_cache_capacity(
+            seq_len,
+            self.max_length,
+            self.config.max_position_embeddings,
+        );
+        eprintln!(
+            "[kv-cache] mode={} seq_len={} max_new_tokens={} capacity={}",
+            if cache_capacity > 0 {
+                "static-scatter"
+            } else {
+                "dynamic-cat"
+            },
+            seq_len,
+            self.max_length,
+            cache_capacity
+        );
+        let mut past_key_values = Some(Cache::new_with_capacity(
+            true,
+            input_ids.dtype(),
+            &self.config,
+            cache_capacity,
+        )?);
 
-        let mut attention_mask = match attention_mask {
-            Some(mask) => mask,
-            None => Tensor::ones((1, seq_len), DType::U32, &device)?.to_dtype(DType::I64)?,
+        let mut position_ids = if seq_len > 1 {
+            Some(Tensor::arange(0u32, seq_len as u32, &device)?.reshape((1, seq_len))?)
+        } else {
+            None
+        };
+        let mut cache_position = if seq_len > 1 {
+            Some(Tensor::arange(0u32, seq_len as u32, &device)?.reshape((seq_len,))?)
+        } else {
+            None
         };
 
-        let mut position_ids =
-            Tensor::arange(0u32, seq_len as u32, &device)?.reshape((1, seq_len))?;
-        let mut cache_position =
-            Tensor::arange(0u32, seq_len as u32, &device)?.reshape((seq_len,))?;
-
         let mut input_ids = input_ids.clone();
-        let mut context_ids = tensor_first_row_u32(&input_ids)?;
+        let mut generated_ids = Vec::with_capacity(self.max_length);
 
         let generation_start = Instant::now();
 
         for _i in 0..self.max_length {
             let iter_start = Instant::now();
+            // The model currently builds causal masking inside attention and does not
+            // consume the 2-D tokenizer attention mask, so avoid growing it every token.
             let (logits, new_cache) = self.forward(
                 Some(&input_ids),
-                Some(&attention_mask),
-                Some(&position_ids),
+                None,
+                position_ids.as_ref(),
                 past_key_values,
                 None,
-                Some(&cache_position),
+                cache_position.as_ref(),
                 1,
             )?;
             let forward_elapsed = iter_start.elapsed();
@@ -321,15 +403,13 @@ impl Qwen2MoeForCausalLM {
             let last_logits = logits
                 .narrow(1, logits.dim(1)? - 1, 1)?
                 .squeeze(1)?
-                .squeeze(0)?
-                .to_dtype(DType::F32)?;
-            let scores = last_logits.to_vec1::<f32>()?;
-            let tok_id = select_next_token_with_repetition_controls(
-                &scores,
-                &context_ids,
+                .squeeze(0)?;
+            let tok_id = select_next_token_from_logits(
+                &last_logits,
+                &generated_ids,
                 GENERATION_REPETITION_PENALTY,
                 GENERATION_NO_REPEAT_NGRAM_SIZE,
-            );
+            )?;
             let last_token = Tensor::new(&[tok_id as i64], &device)?.reshape((1, 1))?;
 
             // 遇到任意停止 token 就结束（含 <|im_end|>=151645、<|im_start|>=151644、<|endoftext|>=151643）
@@ -357,24 +437,12 @@ impl Qwen2MoeForCausalLM {
             if !callback(tok_id) {
                 break;
             }
-            context_ids.push(tok_id);
+            generated_ids.push(tok_id);
 
             // 准备下一轮输入
-            input_ids = last_token.to_dtype(DType::I64)?;
-
-            position_ids = position_ids
-                .narrow(1, position_ids.dim(1)? - 1, 1)?
-                .to_dtype(DType::I64)?
-                .add(&Tensor::new(1_i64, &position_ids.device())?.reshape((1, 1))?)?;
-
-            let last_cache_pos = cache_position
-                .narrow(0, cache_position.dim(0)? - 1, 1)?
-                .to_dtype(DType::I64)?;
-            cache_position = last_cache_pos
-                .add(&Tensor::new(1_i64, &cache_position.device())?.reshape((1,))?)?;
-
-            let ones = Tensor::ones((1, 1), DType::I64, &attention_mask.device())?;
-            attention_mask = Tensor::cat(&[&attention_mask, &ones], 1)?;
+            input_ids = last_token;
+            position_ids = None;
+            cache_position = None;
         }
 
         Ok(())
@@ -383,7 +451,7 @@ impl Qwen2MoeForCausalLM {
     pub fn generate(
         &mut self,
         input_ids: &Tensor,
-        mut attention_mask: Option<Tensor>,
+        _attention_mask: Option<Tensor>,
         experiment_mode: Option<&str>,
     ) -> Result<(Tensor, f64)> {
         let mut prefill_time = 0f64;
@@ -391,42 +459,62 @@ impl Qwen2MoeForCausalLM {
         //     prefill_time = std::time::Instant::now().elapsed().as_secs_f64(); // 起始计时
         // }
 
-        let mut past_key_values = Some(Cache::new(true, input_ids.dtype(), &self.config)?);
         let seq_len = input_ids.dim(1)?; // (1, seq_len)
 
         let device = self.device.clone();
-
-        // 如果 attention_mask 为空，则填充为全 1
-        let mut attention_mask = match attention_mask {
-            Some(mask) => mask,
-            None => Tensor::ones((1, seq_len), DType::U32, &device)?.to_dtype(DType::I64)?,
-        };
+        let cache_capacity =
+            static_kv_cache_capacity(seq_len, 1024, self.config.max_position_embeddings);
+        eprintln!(
+            "[kv-cache] mode={} seq_len={} max_new_tokens={} capacity={}",
+            if cache_capacity > 0 {
+                "static-scatter"
+            } else {
+                "dynamic-cat"
+            },
+            seq_len,
+            1024,
+            cache_capacity
+        );
+        let mut past_key_values = Some(Cache::new_with_capacity(
+            true,
+            input_ids.dtype(),
+            &self.config,
+            cache_capacity,
+        )?);
 
         // 初始位置 id 和 cache_position
-        let mut position_ids =
-            Tensor::arange(0u32, seq_len as u32, &device)?.reshape((1, seq_len))?;
-        let mut cache_position =
-            Tensor::arange(0u32, seq_len as u32, &device)?.reshape((seq_len,))?;
+        let mut position_ids = if seq_len > 1 {
+            Some(Tensor::arange(0u32, seq_len as u32, &device)?.reshape((1, seq_len))?)
+        } else {
+            None
+        };
+        let mut cache_position = if seq_len > 1 {
+            Some(Tensor::arange(0u32, seq_len as u32, &device)?.reshape((seq_len,))?)
+        } else {
+            None
+        };
 
         let mut input_ids = input_ids.clone();
-        let mut context_ids = tensor_first_row_u32(&input_ids)?;
-        let mut output = None;
+        let mut generated_ids = Vec::with_capacity(1024);
+        let mut output_ids: Vec<i64> = Vec::with_capacity(1024);
 
         for i in 0..1024 {
+            // The model currently builds causal masking inside attention and does not
+            // consume the 2-D tokenizer attention mask, so avoid growing it every token.
             let (logits, new_cache) = self.forward(
                 Some(&input_ids),
-                Some(&attention_mask),
-                Some(&position_ids),
+                None,
+                position_ids.as_ref(),
                 past_key_values,
                 None,
-                Some(&cache_position),
+                cache_position.as_ref(),
                 1,
             )?;
 
             past_key_values = new_cache;
 
             // 检查第一次迭代的 logits 是否有 NaN
-            if i == 0 {
+            if tensor_debug_enabled() && i == 0 {
                 let last_logits = logits.narrow(1, logits.dim(1)? - 1, 1)?.squeeze(1)?;
                 let max_val = last_logits.max(candle_core::D::Minus1)?;
                 let min_val = last_logits.min(candle_core::D::Minus1)?;
@@ -443,24 +531,17 @@ impl Qwen2MoeForCausalLM {
             let last_logits = logits
                 .narrow(1, logits.dim(1)? - 1, 1)?
                 .squeeze(1)?
-                .squeeze(0)?
-                .to_dtype(DType::F32)?;
-            let scores = last_logits.to_vec1::<f32>()?;
-            let tok_id = select_next_token_with_repetition_controls(
-                &scores,
-                &context_ids,
+                .squeeze(0)?;
+            let tok_id = select_next_token_from_logits(
+                &last_logits,
+                &generated_ids,
                 GENERATION_REPETITION_PENALTY,
                 GENERATION_NO_REPEAT_NGRAM_SIZE,
-            );
+            )?;
             let next_token = Tensor::new(&[tok_id as i64], &device)?.reshape((1, 1))?;
+            output_ids.push(tok_id as i64);
 
-            if i == 0 {
-                output = Some(next_token.clone());
-            } else {
-                output = Some(Tensor::cat(&[&output.unwrap(), &next_token], 1)?);
-            }
-
-            input_ids = next_token.to_dtype(DType::I64)?;
+            input_ids = next_token;
 
             // 早停
             // if self.early_stopping && i > self.min_length && input_ids.to_vec1::<i64>()?[0] == self.config.eos_token_id as i64 {
@@ -470,31 +551,20 @@ impl Qwen2MoeForCausalLM {
             if i < 5 || i % 50 == 0 {
                 eprintln!("[token {}] id={}", i, tok_id);
             }
-            context_ids.push(tok_id);
+            generated_ids.push(tok_id);
             // 同样检查所有停止 token（<|im_end|> / <|im_start|> / <|endoftext|>）
             if self.config.stop_token_ids.contains(&tok_id) {
-                return Ok((output.unwrap(), prefill_time));
+                let output =
+                    Tensor::new(output_ids.as_slice(), &device)?.reshape((1, output_ids.len()))?;
+                return Ok((output, prefill_time));
             }
 
-            // 准备下一轮的位置 id / cache pos / mask
-            // position_ids[:, -1] + 1 → [B, 1]
-            position_ids = position_ids
-                .narrow(1, position_ids.dim(1)? - 1, 1)?
-                .to_dtype(DType::I64)?
-                .add(&Tensor::new(1_i64, &position_ids.device())?.reshape((1, 1))?)?;
-
-            // cache_position[-1] + 1 → [1]，并 reshape 为 [1] or [1, 1]
-            let last_cache_pos = cache_position
-                .narrow(0, cache_position.dim(0)? - 1, 1)?
-                .to_dtype(DType::I64)?;
-            cache_position = last_cache_pos
-                .add(&Tensor::new(1_i64, &cache_position.device())?.reshape((1,))?)?; // shape: [1]
-
-            // attention_mask: [1, S]，拼接上 [1, 1] 的 ones
-            let ones = Tensor::ones((1, 1), DType::I64, &attention_mask.device())?;
-            attention_mask = Tensor::cat(&[&attention_mask, &ones], 1)?; // dim=1
+            // 准备下一轮的位置 id / cache pos
+            position_ids = None;
+            cache_position = None;
         }
 
-        Ok((output.unwrap(), prefill_time))
+        let output = Tensor::new(output_ids.as_slice(), &device)?.reshape((1, output_ids.len()))?;
+        Ok((output, prefill_time))
     }
 }

@@ -1,0 +1,104 @@
+[context] conversation_id=e0d1c0f0-c1f0-456f-8685-71c70a39344c user_chars=35 history_messages=0 cleaned_history_messages=0 prompt_messages=1 prior_context_triggered=true answer_without_prior_history=false discarded_polluted_history=false prompt_chars=259
+[worker] 收到请求，prompt 长度 = 591 chars, attempt = 1
+[kv-cache] mode=static-scatter seq_len=121 max_new_tokens=1024 capacity=1146
+[gen debug] iter=0 tok_id=108048
+[gen timing] iter=0 forward=16.68s total=16.89s
+[gen debug] iter=1 tok_id=100015
+[gen timing] iter=1 forward=377.34ms total=17.44s
+[gen debug] iter=2 tok_id=104509
+[gen timing] iter=2 forward=328.98ms total=18.02s
+[gen debug] iter=3 tok_id=32665
+[gen timing] iter=3 forward=364.46ms total=18.56s
+[gen debug] iter=4 tok_id=18830
+[gen timing] iter=4 forward=322.47ms total=19.06s
+[gen timing] iter=5 forward=357.63ms total=19.61s
+[gen timing] iter=6 forward=410.37ms total=20.26s
+[gen timing] iter=7 forward=347.98ms total=20.86s
+[gen timing] iter=16 forward=614.45ms total=28.03s
+[gen timing] iter=32 forward=502.13ms total=39.57s
+[gen timing] iter=48 forward=448.50ms total=50.75s
+[gen timing] iter=64 forward=353.47ms total=61.07s
+[gen] stop_token_ids 命中: tok_id=151643 第 67 个 token
+[worker] 本次生成完成，finish_reason=stop
+[context] conversation_id=e0d1c0f0-c1f0-456f-8685-71c70a39344c user_chars=66 history_messages=2 cleaned_history_messages=2 prompt_messages=1 prior_context_triggered=false answer_without_prior_history=false discarded_polluted_history=false prompt_chars=290
+[context] filtered role=user chars=35 reason=context-not-triggered
+[context] filtered role=assistant chars=122 reason=context-not-triggered
+[worker] 收到请求，prompt 长度 = 654 chars, attempt = 1
+[kv-cache] mode=static-scatter seq_len=141 max_new_tokens=1024 capacity=1166
+[gen debug] iter=0 tok_id=12567
+[gen timing] iter=0 forward=12.05s total=12.27s
+[gen debug] iter=1 tok_id=2916
+[gen timing] iter=1 forward=468.20ms total=12.94s
+[gen debug] iter=2 tok_id=101158
+[gen timing] iter=2 forward=456.52ms total=13.61s
+[gen debug] iter=3 tok_id=100751
+[gen timing] iter=3 forward=665.18ms total=14.49s
+[gen debug] iter=4 tok_id=99795
+[gen timing] iter=4 forward=624.34ms total=15.31s
+[gen timing] iter=5 forward=540.77ms total=16.05s
+[gen timing] iter=6 forward=381.87ms total=16.66s
+[gen timing] iter=7 forward=357.75ms total=17.22s
+[gen timing] iter=16 forward=288.55ms total=22.19s
+[gen timing] iter=32 forward=266.58ms total=31.16s
+[gen timing] iter=48 forward=341.03ms total=40.95s
+[gen timing] iter=64 forward=332.61ms total=50.22s
+[gen timing] iter=80 forward=496.55ms total=61.47s
+[gen timing] iter=96 forward=309.94ms total=72.31s
+[gen timing] iter=112 forward=297.58ms total=81.32s
+[gen timing] iter=128 forward=301.89ms total=90.45s
+[gen timing] iter=144 forward=294.42ms total=98.96s
+[gen] stop_token_ids 命中: tok_id=151643 第 150 个 token
+[worker] 本次生成完成，finish_reason=stop
+[context] conversation_id=e0d1c0f0-c1f0-456f-8685-71c70a39344c user_chars=720 history_messages=4 cleaned_history_messages=4 prompt_messages=1 prior_context_triggered=false answer_without_prior_history=false discarded_polluted_history=false prompt_chars=1214
+[context] filtered role=user chars=35 reason=context-not-triggered
+[context] filtered role=assistant chars=122 reason=context-not-triggered
+[context] filtered role=user chars=66 reason=context-not-triggered
+[context] filtered role=assistant chars=285 reason=context-not-triggered
+[worker] 收到请求，prompt 长度 = 2332 chars, attempt = 1
+[kv-cache] mode=static-scatter seq_len=739 max_new_tokens=1024 capacity=1764
+[gen debug] iter=0 tok_id=100345
+[gen timing] iter=0 forward=29.97s total=30.30s
+[gen debug] iter=1 tok_id=87026
+[gen timing] iter=1 forward=764.92ms total=31.30s
+[gen debug] iter=2 tok_id=103008
+[gen timing] iter=2 forward=573.73ms total=32.17s
+[gen debug] iter=3 tok_id=45785
+[gen timing] iter=3 forward=544.94ms total=33.03s
+[gen debug] iter=4 tok_id=44931
+[gen timing] iter=4 forward=499.47ms total=33.74s
+[gen timing] iter=5 forward=391.03ms total=34.34s
+[gen timing] iter=6 forward=480.67ms total=35.02s
+[gen timing] iter=7 forward=371.26ms total=35.69s
+[worker] 日期事实守卫命中，准备重试；已生成 16 token
+[worker] 本次生成被过滤为空，准备第 2 次模型重试
+[worker] 收到请求，prompt 长度 = 4138 chars, attempt = 2
+[kv-cache] mode=static-scatter seq_len=1373 max_new_tokens=1024 capacity=2398
+[gen debug] iter=0 tok_id=87026
+[gen timing] iter=0 forward=6.84s total=7.11s
+[gen debug] iter=1 tok_id=99172
+[gen timing] iter=1 forward=338.27ms total=7.73s
+[gen debug] iter=2 tok_id=99794
+[gen timing] iter=2 forward=319.49ms total=8.32s
+[gen debug] iter=3 tok_id=102224
+[gen timing] iter=3 forward=311.72ms total=8.91s
+[gen debug] iter=4 tok_id=99522
+[gen timing] iter=4 forward=380.13ms total=9.62s
+[gen timing] iter=5 forward=294.22ms total=10.12s
+[gen timing] iter=6 forward=292.98ms total=10.62s
+[worker] 日期事实守卫命中，准备重试；已生成 7 token
+[worker] 本次生成被过滤为空，准备第 3 次模型重试
+[worker] 收到请求，prompt 长度 = 4138 chars, attempt = 3
+[kv-cache] mode=static-scatter seq_len=1373 max_new_tokens=1024 capacity=2398
+[gen debug] iter=0 tok_id=87026
+[gen timing] iter=0 forward=4.94s total=5.19s
+[gen debug] iter=1 tok_id=99172
+[gen timing] iter=1 forward=310.74ms total=5.75s
+[gen debug] iter=2 tok_id=99794
+[gen timing] iter=2 forward=374.84ms total=6.45s
+[gen debug] iter=3 tok_id=99245
+[gen timing] iter=3 forward=314.47ms total=7.04s
+[gen debug] iter=4 tok_id=26850
+[gen timing] iter=4 forward=356.27ms total=7.71s
+[worker] 日期事实守卫命中，准备重试；已生成 5 token
+[worker] 日期事实守卫连续失败，使用运行时事实生成动态纠偏答案
+[worker] 本次生成完成，finish_reason=stop

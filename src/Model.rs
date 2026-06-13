@@ -1,11 +1,13 @@
 use crate::Cache::Cache;
 use crate::DecoderLayer::Qwen2MoeDecoderLayer;
 use crate::RmsNorm::Qwen2MoeRMSNorm;
+use crate::RotaryEmbedding::Qwen2MoeRotaryEmbedding;
 use crate::configuration_qwen::Qwen2MoeConfig;
 use crate::load::ExpertTensorLoader;
 use crate::nn_embedding::Embedding;
-use candle_core::{Device, Error, Result, Tensor};
+use candle_core::{DType, Device, Error, Result, Tensor};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tqdm::tqdm;
 
 #[derive(Debug, Clone)]
@@ -29,9 +31,17 @@ impl Qwen2MoeModel {
         )?;
 
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
+        let shared_rotary_emb = Arc::new(Qwen2MoeRotaryEmbedding::new(
+            cfg.hidden_size / cfg.num_attention_heads,
+            cfg.max_position_embeddings,
+            cfg.rope_theta,
+            DType::F32,
+            &cfg.device,
+        )?);
 
         for layer_idx in 0..cfg.num_hidden_layers {
-            let layer = Qwen2MoeDecoderLayer::new(cfg, layer_idx)?;
+            let layer =
+                Qwen2MoeDecoderLayer::new_with_rotary(cfg, layer_idx, shared_rotary_emb.clone())?;
             layers.push(layer);
         }
 
@@ -56,6 +66,13 @@ impl Qwen2MoeModel {
         // }
         for i in tqdm(0..self.config.num_hidden_layers) {
             self.layers[i].init_weights(path)?;
+            let warmed = self.layers[i].mlp.prewarm_cpu_dequant_cache()?;
+            if warmed > 0 {
+                eprintln!(
+                    "[moe-cache] layer={} warmed {} CPU dequant experts",
+                    i, warmed
+                );
+            }
         }
         // 加载最终 LayerNorm 权重
         let ln_path = original_dir.join("model.norm.weight");
@@ -101,10 +118,13 @@ impl Qwen2MoeModel {
             None => self.embed_tokens.forward(input_ids.unwrap())?,
         };
 
-        // 4. 计算 cache_position
-        let cache_position = match cache_position {
-            Some(pos) => pos.clone(),
-            None => {
+        let seq_len = inputs_embeds.dim(1)?; // [batch, seq, hidden]
+
+        // 4. 计算 cache_position。单 token decode 快路径不需要显式
+        // position tensor；KV cache 可根据当前长度追加，Attention 也用
+        // kv_seq_len - 1 推导 RoPE 位置。
+        let computed_cache_position = if cache_position.is_none() && seq_len > 1 {
+            Some({
                 let past_seen_tokens = if let Some(cache) = &past_key_values {
                     cache.get_seq_length()
                 } else {
@@ -112,22 +132,30 @@ impl Qwen2MoeModel {
                 };
 
                 let start = past_seen_tokens as i64;
-                let seq_len = inputs_embeds.dim(1)?; // [batch, seq, hidden]
                 Tensor::arange(start, start + seq_len as i64, inputs_embeds.device())?
-            }
+            })
+        } else {
+            None
         };
+        let cache_position_ref = cache_position.or(computed_cache_position.as_ref());
 
         // 5. position_ids 默认是 cache_position.unsqueeze(0)
-        let position_ids = match position_ids {
-            Some(pos_ids) => pos_ids.clone(),
-            None => cache_position.unsqueeze(0)?,
+        let computed_position_ids = if position_ids.is_none() && seq_len > 1 {
+            Some(
+                cache_position_ref
+                    .ok_or_else(|| Error::msg("cache_position is required for multi-token input"))?
+                    .unsqueeze(0)?,
+            )
+        } else {
+            None
         };
+        let position_ids_ref = position_ids.or(computed_position_ids.as_ref());
 
         // 6. 更新 causal_mask
         let causal_mask = self._update_causal_mask(
             attention_mask,
             &inputs_embeds,
-            &cache_position,
+            cache_position_ref,
             &past_key_values,
         )?;
 
@@ -139,30 +167,15 @@ impl Qwen2MoeModel {
         // 7. forward，初始化 hidden_states
         let mut hidden_states = inputs_embeds;
 
-        let mut next_prefetch_expert_list = None;
-
         // 8. 逐层调用 decoder layer forward
-        for i in 0..self.config.num_hidden_layers {
-            let (left, right) = self.layers.split_at_mut(i + 1);
-            let layer = &mut left[i];
-            let next_layer = if i + 1 < self.config.num_hidden_layers {
-                Some(&mut right[0])
-            } else {
-                None
-            };
-
-            let (new_hidden_states, _new_cache, new_prefetch) = layer.forward(
+        for layer in &mut self.layers {
+            hidden_states = layer.forward(
                 &hidden_states,
                 causal_mask.as_ref(),
-                Some(&position_ids),
+                position_ids_ref,
                 past_key_values.as_mut(),
-                Some(&cache_position),
-                next_prefetch_expert_list,
-                next_layer,
+                cache_position_ref,
             )?;
-
-            hidden_states = new_hidden_states;
-            next_prefetch_expert_list = new_prefetch;
         }
 
         // 9. norm
@@ -176,7 +189,7 @@ impl Qwen2MoeModel {
         &self,
         attention_mask: Option<&Tensor>,
         input_tensor: &Tensor,
-        cache_position: &Tensor,
+        cache_position: Option<&Tensor>,
         past_key_values: &Option<Cache>,
     ) -> Result<Option<Tensor>> {
         /*        let past_seen_tokens = if past_key_values.is_some(){
@@ -225,6 +238,35 @@ impl Qwen2MoeModel {
 
         Ok(Some(causal_mask)) */
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::Device;
+
+    #[test]
+    fn decoder_layers_share_rotary_embedding_cache() -> Result<()> {
+        let mut cfg = Qwen2MoeConfig::new();
+        cfg.device = Device::Cpu;
+        cfg.num_hidden_layers = 2;
+        cfg.hidden_size = 8;
+        cfg.num_attention_heads = 2;
+        cfg.num_key_value_heads = 2;
+        cfg.max_position_embeddings = 16;
+        cfg.offload_map = (0..cfg.num_hidden_layers)
+            .map(|idx| (idx, cfg.num_experts))
+            .collect();
+        cfg.quan_map = (0..cfg.num_hidden_layers).map(|idx| (idx, 4)).collect();
+
+        let model = Qwen2MoeModel::new(&cfg)?;
+
+        assert!(Arc::ptr_eq(
+            &model.layers[0].self_attn.rotary_emb,
+            &model.layers[1].self_attn.rotary_emb
+        ));
+        Ok(())
     }
 }
 

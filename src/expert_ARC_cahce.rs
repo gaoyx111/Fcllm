@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
@@ -33,9 +34,12 @@ impl ARC_Cache {
 
     pub fn update_list(&mut self, expert_list: &[usize]) -> Vec<usize> {
         let mut evicted_list = Vec::new();
+        let mut evicted_seen = HashSet::new();
+        let protected: HashSet<usize> = expert_list.iter().copied().collect();
+
         for &expert_id in expert_list {
             if let Some(evicted_id) = self.update(expert_id) {
-                if !expert_list.contains(&evicted_id) && !evicted_list.contains(&evicted_id) {
+                if !protected.contains(&evicted_id) && evicted_seen.insert(evicted_id) {
                     evicted_list.push(evicted_id);
                 }
             }
